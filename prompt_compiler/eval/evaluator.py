@@ -1,0 +1,212 @@
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field
+from statistics import mean
+from typing import Iterable
+
+from prompt_compiler.candidates.candidate import Candidate
+from prompt_compiler.eval.contract_checks import OutputContract
+from prompt_compiler.eval.embedding_distance import DriftScorer, LexicalDriftScorer
+from prompt_compiler.models.base import GenerateParams, ModelClient
+from prompt_compiler.prompt.template import PromptTemplate
+from prompt_compiler.tokenizer import Tokenizer
+
+
+@dataclass(frozen=True)
+class EvaluationWeights:
+    token: float = 0.20
+    embedding: float = 0.20
+    judge: float = 0.25
+    format: float = 0.20
+    task: float = 0.10
+    variance: float = 0.05
+
+
+@dataclass(frozen=True)
+class FailureCase:
+    input_id: str
+    failure_type: str
+    reason: str
+    reference_output: str
+    candidate_output: str
+
+
+@dataclass(frozen=True)
+class OutputComparison:
+    input_id: str
+    semantic_drift: float
+    loss: float
+    contract_ok: bool
+    task_ok: bool
+    language_ok: bool
+    failures: tuple[FailureCase, ...] = ()
+
+
+@dataclass(frozen=True)
+class CandidateOutputRecord:
+    candidate_id: str
+    input_id: str
+    reference_output: str
+    candidate_output: str
+    loss: float
+    semantic_drift: float
+
+
+@dataclass(frozen=True)
+class CandidateReport:
+    candidate_id: str
+    prompt_template: str
+    instruction_tokens: int
+    token_reduction: float
+    avg_semantic_drift: float
+    avg_loss: float
+    format_failure_rate: float
+    task_failure_rate: float
+    language_failure_rate: float
+    output_variance: float
+    examples_failed: list[FailureCase]
+    operator_summary: dict[str, int]
+    output_records: list[CandidateOutputRecord] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        data = asdict(self)
+        data["examples_failed"] = [asdict(item) for item in self.examples_failed]
+        data["output_records"] = [asdict(item) for item in self.output_records]
+        return data
+
+
+class Evaluator:
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        output_contract: OutputContract | None = None,
+        weights: EvaluationWeights | None = None,
+        drift_scorer: DriftScorer | None = None,
+    ):
+        self.tokenizer = tokenizer
+        self.output_contract = output_contract or OutputContract()
+        self.weights = weights or EvaluationWeights()
+        self.drift_scorer = drift_scorer or LexicalDriftScorer()
+
+    def compare_outputs(self, candidate_output: str, reference_output: str, input_id: str) -> OutputComparison:
+        contract_result = self.output_contract.validate(candidate_output)
+        semantic_drift = self.drift_scorer.distance(candidate_output, reference_output)
+        task_ok = _task_equivalent(candidate_output, reference_output)
+        language_ok = "language_drift" not in contract_result.failures
+
+        failures: list[FailureCase] = []
+        if not contract_result.ok:
+            failures.append(
+                FailureCase(
+                    input_id=input_id,
+                    failure_type="format_failure",
+                    reason=",".join(contract_result.failures),
+                    reference_output=reference_output,
+                    candidate_output=candidate_output,
+                )
+            )
+        if not task_ok:
+            failures.append(
+                FailureCase(
+                    input_id=input_id,
+                    failure_type="task_failure",
+                    reason="parsed task fields differ",
+                    reference_output=reference_output,
+                    candidate_output=candidate_output,
+                )
+            )
+
+        loss = self.weights.embedding * semantic_drift
+        if not contract_result.ok:
+            loss += self.output_contract.hard_penalty
+        if not task_ok:
+            loss += self.weights.task
+        if not language_ok:
+            loss += self.weights.format
+
+        return OutputComparison(
+            input_id=input_id,
+            semantic_drift=semantic_drift,
+            loss=loss,
+            contract_ok=contract_result.ok,
+            task_ok=task_ok,
+            language_ok=language_ok,
+            failures=tuple(failures),
+        )
+
+    def evaluate_candidate(
+        self,
+        *,
+        candidate: Candidate,
+        model: ModelClient,
+        references: Iterable,
+        original_instruction_tokens: int,
+        params: GenerateParams,
+    ) -> CandidateReport:
+        prompt = PromptTemplate(candidate.prompt_template)
+        comparisons: list[OutputComparison] = []
+        output_records: list[CandidateOutputRecord] = []
+        for reference in references:
+            rendered = prompt.render({"input": reference.input_text})
+            response = model.generate(rendered, params)
+            comparison = self.compare_outputs(response.text, reference.reference_output, reference.id)
+            comparisons.append(comparison)
+            output_records.append(
+                CandidateOutputRecord(
+                    candidate_id=candidate.id,
+                    input_id=reference.id,
+                    reference_output=reference.reference_output,
+                    candidate_output=response.text,
+                    loss=comparison.loss,
+                    semantic_drift=comparison.semantic_drift,
+                )
+            )
+
+        instruction_tokens = self.tokenizer.count(prompt.instruction_text())
+        token_reduction = 1.0 - (instruction_tokens / max(original_instruction_tokens, 1))
+        failures = [failure for comparison in comparisons for failure in comparison.failures]
+        count = max(len(comparisons), 1)
+        operator_summary: dict[str, int] = {}
+        for chunk in candidate.chunks:
+            key = f"{chunk.chunk_type.value}:{chunk.operator.value}"
+            operator_summary[key] = operator_summary.get(key, 0) + 1
+
+        avg_drift = mean([comparison.semantic_drift for comparison in comparisons]) if comparisons else 1.0
+        token_ratio = instruction_tokens / max(original_instruction_tokens, 1)
+        avg_loss = (
+            mean([comparison.loss for comparison in comparisons]) if comparisons else self.output_contract.hard_penalty
+        ) + self.weights.token * token_ratio
+
+        return CandidateReport(
+            candidate_id=candidate.id,
+            prompt_template=candidate.prompt_template,
+            instruction_tokens=instruction_tokens,
+            token_reduction=token_reduction,
+            avg_semantic_drift=avg_drift,
+            avg_loss=avg_loss,
+            format_failure_rate=sum(not item.contract_ok for item in comparisons) / count,
+            task_failure_rate=sum(not item.task_ok for item in comparisons) / count,
+            language_failure_rate=sum(not item.language_ok for item in comparisons) / count,
+            output_variance=0.0,
+            examples_failed=failures,
+            operator_summary=operator_summary,
+            output_records=output_records,
+        )
+
+
+def _task_equivalent(candidate_output: str, reference_output: str) -> bool:
+    candidate_json = _json_dict(candidate_output)
+    reference_json = _json_dict(reference_output)
+    if candidate_json is not None and reference_json is not None:
+        comparable_fields = set(candidate_json) & set(reference_json) & {"status", "label", "answer"}
+        return all(candidate_json[field] == reference_json[field] for field in comparable_fields)
+    return candidate_output.strip() == reference_output.strip()
+
+
+def _json_dict(text: str) -> dict | None:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None

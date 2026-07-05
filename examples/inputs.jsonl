@@ -1,0 +1,5 @@
+{"id":"ex1","input":"benign login from known device"}
+{"id":"ex2","input":"malware beacon detected"}
+{"id":"ex3","input":"routine patch completed"}
+{"id":"ex4","input":"credential theft alert"}
+

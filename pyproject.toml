@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prompt-compression-layer"
+version = "0.1.0"
+description = "Tokenizer-aware behavioral prompt compression compiler."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+prompt-compiler = "prompt_compiler.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["prompt_compiler*"]
+

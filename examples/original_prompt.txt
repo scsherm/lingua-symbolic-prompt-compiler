@@ -1,0 +1,6 @@
+You are doing alert triage.
+Return only valid JSON. Do not include markdown.
+The status field must be either OPEN or CLOSED.
+Input:
+{{input}}
+
