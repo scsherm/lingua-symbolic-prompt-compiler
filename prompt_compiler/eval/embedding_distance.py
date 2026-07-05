@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass
 from importlib import import_module
@@ -47,11 +46,11 @@ class LexicalDriftScorer:
 @dataclass
 class EmbeddingDriftScorer:
     client: EmbeddingClient
-    name: str = "embedding"
+    name: str = "embedding_euclidean"
 
     def distance(self, candidate: str, reference: str) -> float:
         candidate_vec, reference_vec = self.client.embed([candidate, reference])
-        return cosine_distance(candidate_vec, reference_vec)
+        return euclidean_distance(candidate_vec, reference_vec)
 
 
 class SentenceTransformersEmbeddingClient:
@@ -65,7 +64,7 @@ class SentenceTransformersEmbeddingClient:
         self._model = sentence_transformers.SentenceTransformer(model_name)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        encoded = self._model.encode(texts, normalize_embeddings=True)
+        encoded = self._model.encode(texts)
         return _to_vector_list(encoded)
 
 
@@ -76,7 +75,7 @@ class HuggingFaceInferenceEmbeddingClient:
         *,
         api_key: str | None = None,
         provider: str | None = None,
-        normalize: bool = True,
+        normalize: bool = False,
     ):
         try:
             huggingface_hub = import_module("huggingface_hub")
@@ -124,19 +123,13 @@ def make_drift_scorer(
     raise ValueError(f"Unknown drift scorer provider: {provider}")
 
 
-def cosine_distance(a: list[float], b: list[float]) -> float:
+def euclidean_distance(a: list[float], b: list[float]) -> float:
     if not a or not b:
         return 1.0
     length = min(len(a), len(b))
     a = a[:length]
     b = b[:length]
-    dot = sum(left * right for left, right in zip(a, b))
-    norm_a = math.sqrt(sum(value * value for value in a))
-    norm_b = math.sqrt(sum(value * value for value in b))
-    if norm_a == 0 or norm_b == 0:
-        return 1.0
-    similarity = max(min(dot / (norm_a * norm_b), 1.0), -1.0)
-    return 1.0 - ((similarity + 1.0) / 2.0)
+    return sum((left - right) ** 2 for left, right in zip(a, b)) ** 0.5
 
 
 def _tokens(text: str) -> list[str]:

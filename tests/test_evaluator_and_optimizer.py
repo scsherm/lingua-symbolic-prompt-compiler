@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from prompt_compiler.eval.contract_checks import OutputContract
-from prompt_compiler.eval.embedding_distance import EmbeddingDriftScorer, cosine_distance
+from prompt_compiler.eval.embedding_distance import EmbeddingDriftScorer, euclidean_distance
 from prompt_compiler.eval.evaluator import Evaluator
 from prompt_compiler.models.mock import RuleBasedMockModel
 from prompt_compiler.optimize.optimizer import optimize_prompt
@@ -13,7 +13,7 @@ from prompt_compiler.tokenizer import ApproxTokenizer
 
 
 class EvaluatorAndOptimizerTests(unittest.TestCase):
-    def test_embedding_drift_scorer_uses_cosine_distance(self):
+    def test_embedding_drift_scorer_uses_euclidean_distance(self):
         class FakeEmbeddingClient:
             name = "fake"
 
@@ -22,8 +22,8 @@ class EvaluatorAndOptimizerTests(unittest.TestCase):
 
         scorer = EmbeddingDriftScorer(FakeEmbeddingClient())
 
-        self.assertEqual(cosine_distance([1.0, 0.0], [1.0, 0.0]), 0.0)
-        self.assertEqual(scorer.distance("a", "b"), 0.5)
+        self.assertEqual(euclidean_distance([1.0, 0.0], [1.0, 0.0]), 0.0)
+        self.assertAlmostEqual(scorer.distance("a", "b"), 2**0.5)
 
     def test_invalid_json_receives_hard_contract_penalty(self):
         evaluator = Evaluator(tokenizer=ApproxTokenizer(), output_contract=OutputContract(require_json=True))

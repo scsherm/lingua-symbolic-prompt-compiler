@@ -44,6 +44,12 @@ Embedding drift providers:
 
 The default embedding model for non-lexical providers is `mixedbread-ai/mxbai-embed-large-v1`, a Hugging Face sentence-transformers-compatible feature-extraction model: <https://huggingface.co/mixedbread-ai/mxbai-embed-large-v1>.
 
+Embedding drift is Euclidean distance over embedding vectors:
+
+```text
+drift = || embed(candidate_output) - embed(reference_output) ||2
+```
+
 Example with Hugging Face provider-backed Mixedbread embeddings:
 
 ```bash
