@@ -81,6 +81,30 @@ python3 -m prompt_compiler.cli \
   --embedding-model mixedbread-ai/mxbai-embed-large-v1
 ```
 
+## Hugging Face Instruction Data
+
+The repo includes a small normalized sample from `HuggingFaceH4/no_robots` at `data/hf/no_robots_100.jsonl`.
+
+Refresh it with:
+
+```bash
+/Users/scsherm/anaconda3/envs/prompt-compression-layer/bin/python \
+  scripts/download_instruction_dataset.py \
+  --dataset HuggingFaceH4/no_robots \
+  --config default \
+  --split train \
+  --limit 100 \
+  --output data/hf/no_robots_100.jsonl
+```
+
+Each row has:
+
+- `input`: the instruction prompt
+- `reference_output`: the dataset demonstration/completion
+- `category`, `dataset`, and source metadata
+
+These dataset completions are useful external references for experiments. For true behavior-preserving prompt compilation, the compiler should still create behavioral references from the frozen target model.
+
 ## Core Artifacts
 
 - `best_prompt.txt`

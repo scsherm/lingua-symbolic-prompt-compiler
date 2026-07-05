@@ -1,0 +1,8 @@
+You are an instruction-following assistant.
+Complete the user's request directly and faithfully.
+
+User request:
+{{input}}
+
+Response:
+
