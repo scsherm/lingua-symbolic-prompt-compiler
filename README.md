@@ -81,26 +81,6 @@ The current exploration space includes:
 
 The tokenizer decides whether Mandarin, symbolic, English, or mixed forms actually reduce cost for the configured model/tokenizer.
 
-## LLM Proposer Contract
-
-The LLM proposer prompt lives at:
-
-```text
-prompt_compiler/operators/llm_chunk_rewrite_prompt.txt
-```
-
-For each non-bound chunk and rewrite operator, the proposer returns one JSON object:
-
-```json
-{
-  "rewritten_chunk": "...",
-  "rationale": "<12 words",
-  "risk_notes": []
-}
-```
-
-The `rewritten_chunk` value is pasted exactly where the source chunk was in the candidate prompt template.
-
 ## Setup
 
 Create the project Conda environment:
