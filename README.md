@@ -1,6 +1,6 @@
-# Prompt Compression Layer
+# Lingua Symbolic Prompt Compiler
 
-Tokenizer-aware behavioral prompt compression compiler.
+Tokenizer-aware lingua-symbolic prompt compiler.
 
 The compiler takes a target model, an original prompt template, and input examples. It records behavioral reference outputs from the original prompt, then searches for shorter prompt templates whose target-model outputs stay close to those references.
 
