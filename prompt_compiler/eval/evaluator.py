@@ -7,7 +7,7 @@ from typing import Iterable
 
 from prompt_compiler.candidates.candidate import Candidate
 from prompt_compiler.eval.contract_checks import OutputContract
-from prompt_compiler.eval.embedding_distance import DriftScorer, LexicalDriftScorer, normalized_euclidean_distance
+from prompt_compiler.eval.embedding_distance import DriftScorer, LexicalDriftScorer, normalize_distance
 from prompt_compiler.models.base import GenerateParams, ModelClient
 from prompt_compiler.prompt.template import PromptTemplate
 from prompt_compiler.tokenizer import Tokenizer
@@ -17,6 +17,7 @@ from prompt_compiler.tokenizer import Tokenizer
 class EvaluationWeights:
     token: float = 0.50
     embedding: float = 0.50
+    semantic_drift_normalization: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,7 @@ class CandidateReport:
     usage_summary: dict[str, int] = field(default_factory=dict)
     output_records: list[CandidateOutputRecord] = field(default_factory=list)
     avg_normalized_semantic_drift: float = 0.0
+    normalized_token_reduction: float = 0.0
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -94,7 +96,7 @@ class Evaluator:
     def compare_outputs(self, candidate_output: str, reference_output: str, input_id: str) -> OutputComparison:
         contract_result = self.output_contract.validate(candidate_output)
         semantic_drift = self.drift_scorer.distance(candidate_output, reference_output)
-        normalized_semantic_drift = _normalize_drift(semantic_drift, self.drift_scorer)
+        normalized_semantic_drift = _normalize_drift(semantic_drift, self.drift_scorer, self.weights)
         task_ok = _task_equivalent(candidate_output, reference_output)
 
         failures: list[FailureCase] = []
@@ -168,6 +170,7 @@ class Evaluator:
 
         instruction_tokens = self.tokenizer.count(prompt.instruction_text())
         token_reduction = 1.0 - (instruction_tokens / max(original_instruction_tokens, 1))
+        normalized_token_reduction = _clamp(token_reduction)
         failures = [failure for comparison in comparisons for failure in comparison.failures]
         count = max(len(comparisons), 1)
         operator_summary: dict[str, int] = {}
@@ -179,9 +182,8 @@ class Evaluator:
         avg_normalized_drift = (
             mean([comparison.normalized_semantic_drift for comparison in comparisons]) if comparisons else 1.0
         )
-        token_ratio = instruction_tokens / max(original_instruction_tokens, 1)
         objective_score = _weighted_loss(
-            token_loss=token_ratio,
+            token_loss=1.0 - normalized_token_reduction,
             normalized_semantic_drift=avg_normalized_drift,
             weights=self.weights,
         )
@@ -191,6 +193,7 @@ class Evaluator:
             prompt_template=candidate.prompt_template,
             instruction_tokens=instruction_tokens,
             token_reduction=token_reduction,
+            normalized_token_reduction=normalized_token_reduction,
             avg_semantic_drift=avg_drift,
             objective_score=objective_score,
             format_failure_rate=sum(not item.contract_ok for item in comparisons) / count,
@@ -230,10 +233,10 @@ def _add_usage(total: dict[str, int], usage: dict[str, int] | None) -> None:
             total[key] = total.get(key, 0) + value
 
 
-def _normalize_drift(semantic_drift: float, scorer: DriftScorer) -> float:
+def _normalize_drift(semantic_drift: float, scorer: DriftScorer, weights: EvaluationWeights) -> float:
     if getattr(scorer, "name", "") == "embedding_euclidean":
-        return normalized_euclidean_distance(semantic_drift)
-    return min(max(semantic_drift, 0.0), 1.0)
+        return normalize_distance(semantic_drift, weights.semantic_drift_normalization)
+    return _clamp(semantic_drift)
 
 
 def _weighted_loss(
@@ -246,3 +249,7 @@ def _weighted_loss(
     if weight_sum <= 0.0:
         return 1.0
     return ((weights.token * token_loss) + (weights.embedding * normalized_semantic_drift)) / weight_sum
+
+
+def _clamp(value: float) -> float:
+    return min(max(value, 0.0), 1.0)

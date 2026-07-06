@@ -50,8 +50,6 @@ class EmbeddingDriftScorer:
 
     def distance(self, candidate: str, reference: str) -> float:
         candidate_vec, reference_vec = self.client.embed([candidate, reference])
-        candidate_vec = _l2_normalize(candidate_vec)
-        reference_vec = _l2_normalize(reference_vec)
         return euclidean_distance(candidate_vec, reference_vec)
 
 
@@ -134,19 +132,14 @@ def euclidean_distance(a: list[float], b: list[float]) -> float:
     return sum((left - right) ** 2 for left, right in zip(a, b)) ** 0.5
 
 
-def normalized_euclidean_distance(distance: float) -> float:
-    return _clamp(distance / 2.0)
+def normalize_distance(distance: float, scale: float) -> float:
+    if scale <= 0.0:
+        return 1.0
+    return _clamp(distance / scale)
 
 
 def _tokens(text: str) -> list[str]:
     return re.findall(r"[\u3400-\u9fff]|[A-Za-z0-9_]+", text.lower())
-
-
-def _l2_normalize(vector: list[float]) -> list[float]:
-    norm = sum(value * value for value in vector) ** 0.5
-    if norm == 0.0:
-        return vector
-    return [value / norm for value in vector]
 
 
 def _clamp(value: float) -> float:

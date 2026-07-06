@@ -51,12 +51,16 @@ Embedding and loss:
 
 ```text
 embedding model: mixedbread-ai/mxbai-embed-large-v1
-embedding normalization: L2-normalized before Euclidean distance
-semantic_drift_norm: semantic_drift / 2
-loss: 0.5 * semantic_drift_norm + 0.5 * (1 - token_reduction)
+embedding distance: raw Euclidean distance
+semantic_drift_normalization: 10.578125
+semantic_drift_norm: clamp(semantic_drift / semantic_drift_normalization, 0, 1)
+token_reduction_norm: clamp(token_reduction, 0, 1)
+loss: 0.5 * semantic_drift_norm + 0.5 * (1 - token_reduction_norm)
 direction: lower is better
 range: 0..1
 ```
+
+The semantic-drift normalization value is the maximum observed raw pairwise drift in this checkpoint's candidate-completion comparison set.
 
 ## Artifacts
 
@@ -115,14 +119,14 @@ Prompt-path verification:
 
 | rank | candidate | candidate id | token reduction | avg drift | avg normalized drift | loss | validation note |
 |---:|---:|---|---:|---:|---:|---:|---|
-| 1 | 3 | `6af23f6fc2b3` | 0.416 | 0.3988 | 0.1994 | 0.3916 | clear |
-| 2 | 4 | `023639879784` | 0.399 | 0.3828 | 0.1914 | 0.3963 | clear |
-| 3 | 5 | `4ec74857c672` | 0.387 | 0.4281 | 0.2141 | 0.4134 | clear |
-| 4 | 1 | `4510ee94bcee` | 0.347 | 0.3681 | 0.1840 | 0.4186 | clear |
-| 5 | 2 | `1d03bbdd31de` | 0.382 | 0.4403 | 0.2201 | 0.4193 | clear |
-| 6 | 6 | `8072d6c59e6d` | 0.295 | 0.4618 | 0.2309 | 0.4681 | meta-structure leakage |
+| 1 | 4 | `023639879784` | 0.399 | 6.3216 | 0.5976 | 0.5994 | clear |
+| 2 | 3 | `6af23f6fc2b3` | 0.416 | 6.5130 | 0.6157 | 0.5998 | clear |
+| 3 | 1 | `4510ee94bcee` | 0.347 | 6.1029 | 0.5769 | 0.6151 | clear |
+| 4 | 5 | `4ec74857c672` | 0.387 | 7.0729 | 0.6686 | 0.6407 | clear |
+| 5 | 2 | `1d03bbdd31de` | 0.382 | 7.2552 | 0.6859 | 0.6522 | clear |
+| 6 | 6 | `8072d6c59e6d` | 0.295 | 7.7018 | 0.7281 | 0.7166 | meta-structure leakage |
 
-Candidate 3 is the current best candidate under the normalized loss on this 3-input checkpoint.
+Candidate 4 is the current best candidate under the normalized loss on this 3-input checkpoint, with Candidate 3 effectively tied.
 
 ## Interpretation
 

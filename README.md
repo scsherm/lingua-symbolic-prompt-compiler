@@ -161,6 +161,7 @@ Useful CLI controls:
 - `--live-log-file`: stable JSONL mirror for `tail -f`, default `runs/live_run_events.jsonl`
 - `--max-concurrency`: maximum concurrent candidate evaluations
 - `--input-limit`: use the first N rows from the input JSONL
+- `--semantic-drift-normalization`: positive scalar used to normalize raw semantic drift before combining it into loss
 - `--send-openai-sampling-params`: sends `temperature` and `top_p` to OpenAI Responses for endpoints that support them
 
 ## Tokenizers
@@ -179,19 +180,19 @@ Rendered prompt token counts are also tracked because long inputs can dominate t
 
 ## Embedding Drift
 
-Embedding drift is Euclidean distance over L2-normalized completion embeddings:
+Embedding drift is raw Euclidean distance over completion embeddings in the configured embedding model's vector space:
 
 ```text
-semantic_drift = || normalize(embed(candidate_output)) - normalize(embed(reference_output)) ||_2
+semantic_drift = || embed(candidate_output) - embed(reference_output) ||_2
 ```
 
-The normalized drift term used by the scalar loss is:
+The semantic-drift score is normalized after distance is computed:
 
 ```text
-semantic_drift_norm = semantic_drift / 2
+semantic_drift_norm = clamp(semantic_drift / semantic_drift_normalization, 0, 1)
 ```
 
-With normalized embeddings, Euclidean distance is bounded to `[0, 2]`, so `semantic_drift_norm` is bounded to `[0, 1]`.
+`semantic_drift_normalization` is an explicit scalar for the embedding model and evaluation context, such as the maximum observed raw drift in a candidate-comparison run.
 
 Supported providers:
 
@@ -218,16 +219,17 @@ The scalar loss is a normalized minimize objective:
 
 ```text
 token_reduction = 1 - candidate_instruction_tokens / original_instruction_tokens
-token_loss = 1 - token_reduction
-semantic_drift_norm = semantic_drift / 2
+token_reduction_norm = clamp(token_reduction, 0, 1)
+token_loss_norm = 1 - token_reduction_norm
+semantic_drift_norm = clamp(semantic_drift / semantic_drift_normalization, 0, 1)
 
-loss = weighted_average(token_loss, semantic_drift_norm)
+loss = weighted_average(token_loss_norm, semantic_drift_norm)
 ```
 
 With the default equal weights:
 
 ```text
-loss = 0.5 * token_loss + 0.5 * semantic_drift_norm
+loss = 0.5 * token_loss_norm + 0.5 * semantic_drift_norm
 ```
 
 The loss is in `[0, 1]`; lower is better. `objective_score` in candidate reports is this normalized loss.
@@ -271,12 +273,12 @@ Candidate ranking from the checkpoint:
 
 | rank | candidate | token reduction | normalized drift | loss | validation note |
 |---:|---:|---:|---:|---:|---|
-| 1 | 3 | 0.416 | 0.199 | 0.392 | clear |
-| 2 | 4 | 0.399 | 0.191 | 0.396 | clear |
-| 3 | 5 | 0.387 | 0.214 | 0.413 | clear |
-| 4 | 1 | 0.347 | 0.184 | 0.419 | clear |
-| 5 | 2 | 0.382 | 0.220 | 0.419 | clear |
-| 6 | 6 | 0.295 | 0.231 | 0.468 | leaked meta structure |
+| 1 | 4 | 0.399 | 0.598 | 0.599 | clear |
+| 2 | 3 | 0.416 | 0.616 | 0.600 | clear |
+| 3 | 1 | 0.347 | 0.577 | 0.615 | clear |
+| 4 | 5 | 0.387 | 0.669 | 0.641 | clear |
+| 5 | 2 | 0.382 | 0.686 | 0.652 | clear |
+| 6 | 6 | 0.295 | 0.728 | 0.717 | leaked meta structure |
 
 ## Hugging Face Data
 

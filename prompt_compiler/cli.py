@@ -9,6 +9,7 @@ from prompt_compiler.candidates.generation import describe_chunkings, seed_popul
 from prompt_compiler.env import load_env_file
 from prompt_compiler.eval.contract_checks import OutputContract
 from prompt_compiler.eval.embedding_distance import DEFAULT_EMBEDDING_MODEL, make_drift_scorer
+from prompt_compiler.eval.evaluator import EvaluationWeights
 from prompt_compiler.models.mock import RuleBasedMockModel
 from prompt_compiler.models.openai_client import OpenAIResponsesModel
 from prompt_compiler.models.base import GenerateParams, ModelClient
@@ -93,6 +94,12 @@ def main() -> int:
     )
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)
     parser.add_argument("--hf-provider", default=None, help="Optional Hugging Face Inference Provider name")
+    parser.add_argument(
+        "--semantic-drift-normalization",
+        type=float,
+        default=1.0,
+        help="Positive scalar used to normalize raw semantic drift before combining it into loss.",
+    )
     args = parser.parse_args()
 
     load_env_file(Path(args.env_file))
@@ -127,6 +134,7 @@ def main() -> int:
         epochs=args.epochs,
         population_size=args.population_size,
         tokenizer=tokenizer,
+        evaluation_weights=EvaluationWeights(semantic_drift_normalization=args.semantic_drift_normalization),
         drift_scorer=make_drift_scorer(
             args.embedding_provider,
             model_name=args.embedding_model,

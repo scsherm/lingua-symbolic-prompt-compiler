@@ -125,18 +125,19 @@ The optimization objective is the tradeoff between prompt compression and genera
 - token reduction
 - Euclidean embedding drift
 
-Embedding drift is computed as Euclidean distance over L2-normalized completion embeddings. The scalar loss uses normalized terms:
+Embedding drift is computed as raw Euclidean distance over completion embeddings. The scalar loss normalizes the resulting metric values before combining them:
 
 ```text
-token_loss = 1 - token_reduction
-semantic_drift_norm = semantic_drift / 2
-loss = weighted_average(token_loss, semantic_drift_norm)
+token_reduction_norm = clamp(token_reduction, 0, 1)
+token_loss_norm = 1 - token_reduction_norm
+semantic_drift_norm = clamp(semantic_drift / semantic_drift_normalization, 0, 1)
+loss = weighted_average(token_loss_norm, semantic_drift_norm)
 ```
 
 With the default equal weights:
 
 ```text
-loss = 0.5 * token_loss + 0.5 * semantic_drift_norm
+loss = 0.5 * token_loss_norm + 0.5 * semantic_drift_norm
 ```
 
 The scalar loss is bounded to `[0, 1]`, and lower is better.
