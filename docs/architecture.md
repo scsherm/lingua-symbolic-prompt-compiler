@@ -1,6 +1,6 @@
-# Behavioral Prompt Compression Architecture
+# Lingua Symbolic Prompt Compiler Architecture
 
-Prompt Compression Layer searches for shorter prompt templates that preserve the behavior of a frozen target model configuration.
+Lingua Symbolic Prompt Compiler searches for shorter prompt templates that preserve the behavior of a frozen target model configuration.
 
 ```text
 input:
