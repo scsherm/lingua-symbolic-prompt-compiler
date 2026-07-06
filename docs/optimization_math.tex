@@ -72,11 +72,22 @@ Rendered prompt cost is also tracked:
 \section{Embedding Drift}
 
 Let \(E\) be the configured embedding model. Lingua Symbolic Prompt Compiler uses
-Euclidean distance for embedding drift:
+Euclidean distance over L2-normalized completion embeddings:
+
+\[
+\tilde{E}(z) = \frac{E(z)}{\lVert E(z) \rVert_2}.
+\]
 
 \[
 d_{\mathrm{emb}}(c, i) =
-\left\| E(\hat{y}_{i,c}) - E(y_i) \right\|_2.
+\left\| \tilde{E}(\hat{y}_{i,c}) - \tilde{E}(y_i) \right\|_2.
+\]
+
+Because both embeddings are unit vectors, \(d_{\mathrm{emb}}(c, i)\) is bounded
+to \([0, 2]\). The normalized drift term is:
+
+\[
+d_{\mathrm{norm}}(c, i) = \frac{d_{\mathrm{emb}}(c, i)}{2}.
 \]
 
 Average drift for candidate \(c\) is:
@@ -86,31 +97,36 @@ Average drift for candidate \(c\) is:
 \frac{1}{n}\sum_{i=1}^{n} d_{\mathrm{emb}}(c, i).
 \]
 
+Average normalized drift is:
+
+\[
+\bar{d}_{\mathrm{norm}}(c) =
+\frac{1}{n}\sum_{i=1}^{n} d_{\mathrm{norm}}(c, i).
+\]
+
 \section{Objective}
 
-The scalar objective combines token ratio and generated-output equivalence
-distance. With Euclidean embedding drift as the active equivalence signal:
+The scalar objective is a normalized loss that combines token loss and
+generated-output semantic drift:
 
 \[
-\mathcal{J}(c) =
-\lambda_t \rho_c
-+ \lambda_e \bar{d}_{\mathrm{emb}}(c).
+\ell_t(c) = 1 - r_c = \rho_c.
 \]
-
-Optional equivalence scorers can be added as output-distance terms:
 
 \[
-\mathcal{J}(c) =
-\lambda_t \rho_c
-+ \lambda_e \bar{d}_{\mathrm{emb}}(c)
-+ \lambda_j \bar{d}_{\mathrm{judge}}(c)
-+ \lambda_r \bar{d}_{\mathrm{rouge}}(c)
-+ \lambda_b \bar{d}_{\mathrm{bleu}}(c).
+\mathcal{L}(c) =
+\frac{\lambda_t \ell_t(c) + \lambda_d \bar{d}_{\mathrm{norm}}(c)}
+     {\lambda_t + \lambda_d}.
 \]
 
-Here \(\bar{d}_{\mathrm{judge}}\) is separate-judge disagreement, while
-\(\bar{d}_{\mathrm{rouge}}\) and \(\bar{d}_{\mathrm{bleu}}\) are text-overlap
-distances derived from ROUGE or BLEU scores.
+The default equal-weight loss is:
+
+\[
+\mathcal{L}(c) =
+0.5 \ell_t(c) + 0.5 \bar{d}_{\mathrm{norm}}(c).
+\]
+
+The loss is bounded to \([0, 1]\), and lower is better.
 
 \section{Validity Signals}
 
@@ -133,8 +149,8 @@ candidate behavior is visible during review.
 Current core objective weights are:
 
 \[
-\lambda_t = 0.20,\quad
-\lambda_e = 0.20.
+\lambda_t = 0.50,\quad
+\lambda_d = 0.50.
 \]
 
 \section{Pareto Frontier}

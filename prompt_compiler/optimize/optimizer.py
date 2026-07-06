@@ -30,9 +30,13 @@ class EvaluationReport:
     best_instruction_tokens: int
     token_reduction: float
     dev_semantic_drift: float
+    dev_normalized_semantic_drift: float
+    dev_loss: float
     dev_format_failure_rate: float
     dev_task_failure_rate: float
     holdout_semantic_drift: float | None
+    holdout_normalized_semantic_drift: float | None
+    holdout_loss: float | None
     holdout_format_failure_rate: float | None
     holdout_task_failure_rate: float | None
     train_size: int
@@ -49,6 +53,8 @@ class EvaluationReport:
         data = asdict(self)
         data["diagnostics"] = [asdict(item) for item in self.diagnostics]
         data["validation_semantic_drift"] = self.dev_semantic_drift
+        data["validation_normalized_semantic_drift"] = self.dev_normalized_semantic_drift
+        data["validation_loss"] = self.dev_loss
         data["format_failure_rate"] = self.dev_format_failure_rate
         data["task_failure_rate"] = self.dev_task_failure_rate
         return data
@@ -253,9 +259,13 @@ def optimize_prompt(
         best_instruction_tokens=best.instruction_tokens,
         token_reduction=best.token_reduction,
         dev_semantic_drift=best.avg_semantic_drift,
+        dev_normalized_semantic_drift=best.avg_normalized_semantic_drift,
+        dev_loss=best.objective_score,
         dev_format_failure_rate=best.format_failure_rate,
         dev_task_failure_rate=best.task_failure_rate,
         holdout_semantic_drift=best_holdout.avg_semantic_drift if best_holdout else None,
+        holdout_normalized_semantic_drift=best_holdout.avg_normalized_semantic_drift if best_holdout else None,
+        holdout_loss=best_holdout.objective_score if best_holdout else None,
         holdout_format_failure_rate=best_holdout.format_failure_rate if best_holdout else None,
         holdout_task_failure_rate=best_holdout.task_failure_rate if best_holdout else None,
         train_size=len(split.train),
@@ -283,7 +293,11 @@ def optimize_prompt(
         best_candidate_id=best.candidate_id,
         token_reduction=round(best.token_reduction, 6),
         dev_semantic_drift=round(best.avg_semantic_drift, 6),
+        dev_normalized_semantic_drift=round(best.avg_normalized_semantic_drift, 6),
+        dev_loss=round(best.objective_score, 6),
         holdout_semantic_drift=round(best_holdout.avg_semantic_drift, 6) if best_holdout else None,
+        holdout_normalized_semantic_drift=round(best_holdout.avg_normalized_semantic_drift, 6) if best_holdout else None,
+        holdout_loss=round(best_holdout.objective_score, 6) if best_holdout else None,
         usage_summary=evaluation_report.usage_summary,
         estimated_cost_usd=evaluation_report.estimated_cost_usd,
     )
@@ -386,6 +400,7 @@ def _evaluate_one(
         instruction_tokens=report.instruction_tokens,
         token_reduction=round(report.token_reduction, 6),
         avg_semantic_drift=round(report.avg_semantic_drift, 6),
+        avg_normalized_semantic_drift=round(report.avg_normalized_semantic_drift, 6),
         objective_score=round(report.objective_score, 6),
         format_failure_rate=round(report.format_failure_rate, 6),
         task_failure_rate=round(report.task_failure_rate, 6),
