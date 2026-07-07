@@ -270,13 +270,19 @@ class TokenWindowChunker:
         return chunks
 
 
-def generate_chunkings(prompt: str, tokenizer: Tokenizer | None = None) -> dict[str, list[PromptChunk]]:
+def generate_chunkings(
+    prompt: str,
+    tokenizer: Tokenizer | None = None,
+    *,
+    token_window_size: int = 80,
+) -> dict[str, list[PromptChunk]]:
+    token_window_size = max(1, token_window_size)
     chunkers: list[Chunker] = [
         ParagraphChunker(),
         SentenceChunker(),
         MarkdownHeadingChunker(),
         SchemaAwareChunker(),
         InstructionRoleChunker(),
-        TokenWindowChunker(tokenizer=tokenizer),
+        TokenWindowChunker(max_tokens=token_window_size, tokenizer=tokenizer),
     ]
     return {chunker.name: _split_placeholder_chunks(chunker.chunk(prompt)) for chunker in chunkers}
