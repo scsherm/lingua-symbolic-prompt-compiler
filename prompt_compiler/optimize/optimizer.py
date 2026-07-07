@@ -90,6 +90,8 @@ def optimize_prompt(
     log_to_stderr: bool = True,
     live_log_path: Path | None = None,
     chunker_names: tuple[str, ...] | None = None,
+    token_window_size: int = 80,
+    elitism_count: int = 1,
 ) -> CompressionRunResult:
     tokenizer = tokenizer or ApproxTokenizer()
     params = params or GenerateParams()
@@ -97,6 +99,7 @@ def optimize_prompt(
     output_dir.mkdir(parents=True, exist_ok=True)
     logger = RunLogger(output_dir / "run_events.jsonl", echo=log_to_stderr, mirror_path=live_log_path)
     max_concurrency = max(1, max_concurrency)
+    elitism_count = max(0, min(elitism_count, population_size))
     normalized_inputs = normalize_inputs(inputs)
 
     logger.event(
@@ -108,6 +111,8 @@ def optimize_prompt(
         max_concurrency=max_concurrency,
         generation_params=params,
         chunkers=chunker_names,
+        token_window_size=token_window_size,
+        elitism_count=elitism_count,
         semantic_drift_normalization=(evaluation_weights or EvaluationWeights()).semantic_drift_normalization,
     )
 
@@ -142,7 +147,12 @@ def optimize_prompt(
         weights=evaluation_weights,
         drift_scorer=drift_scorer,
     )
-    chunking_plan = describe_chunkings(original_prompt.text, tokenizer=tokenizer, chunker_names=chunker_names)
+    chunking_plan = describe_chunkings(
+        original_prompt.text,
+        tokenizer=tokenizer,
+        chunker_names=chunker_names,
+        token_window_size=token_window_size,
+    )
     logger.event(
         "chunking_plan",
         active_chunkers=list(chunking_plan),
@@ -161,6 +171,7 @@ def optimize_prompt(
         population_size=population_size,
         proposer=rewrite_proposer,
         chunker_names=chunker_names,
+        token_window_size=token_window_size,
     )
     candidate_index: dict[str, Candidate] = {candidate.id: candidate for candidate in population}
     logger.event(
@@ -195,6 +206,9 @@ def optimize_prompt(
         all_evaluated_reports.extend(epoch_reports)
         frontier = compute_pareto_frontier(epoch_reports)
         if epoch < max(epochs, 1) - 1:
+            ranked_frontier = _rank_reports(frontier)
+            elite_ids = tuple(report.candidate_id for report in ranked_frontier[:elitism_count])
+            frontier_order = tuple(report.candidate_id for report in ranked_frontier)
             population = next_generation_from_frontier(
                 population=population,
                 frontier_ids={report.candidate_id for report in frontier},
@@ -202,12 +216,16 @@ def optimize_prompt(
                 population_size=population_size,
                 proposer=rewrite_proposer,
                 chunker_names=chunker_names,
+                frontier_order=frontier_order,
+                elite_ids=elite_ids,
             )
             candidate_index.update({candidate.id: candidate for candidate in population})
             logger.event(
                 "mutation_done",
                 epoch=epoch,
                 frontier_count=len(frontier),
+                elite_ids=elite_ids,
+                frontier_order=frontier_order,
                 next_population_count=len(population),
                 summary=_population_summary(population),
             )
@@ -319,6 +337,10 @@ def _choose_best(reports: list[CandidateReport]) -> CandidateReport:
         raise ValueError("No candidate reports were produced")
     compressed_reports = [report for report in reports if report.token_reduction > 0]
     reports = compressed_reports or reports
+    return _rank_reports(reports)[0]
+
+
+def _rank_reports(reports: list[CandidateReport]) -> list[CandidateReport]:
     return sorted(
         reports,
         key=lambda item: (
@@ -327,7 +349,7 @@ def _choose_best(reports: list[CandidateReport]) -> CandidateReport:
             item.objective_score,
             -item.token_reduction,
         ),
-    )[0]
+    )
 
 
 def _evaluate_population(

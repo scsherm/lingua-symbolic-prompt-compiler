@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from prompt_compiler.candidates.candidate import Candidate, CompressedChunk
 from prompt_compiler.candidates.genome import CandidateGenome
 from prompt_compiler.operators.proposer import RewriteProposer, TokenizerAwareRewritePlanner
@@ -45,11 +47,12 @@ def seed_population(
     population_size: int,
     proposer: RewriteProposer | None = None,
     chunker_names: tuple[str, ...] | None = None,
+    token_window_size: int = 80,
 ) -> list[Candidate]:
     planner = TokenizerAwareRewritePlanner(tokenizer, proposer=proposer)
     population: list[Candidate] = []
     seen_prompts: set[str] = set()
-    chunkings = _selected_chunkings(prompt_template, tokenizer, chunker_names)
+    chunkings = _selected_chunkings(prompt_template, tokenizer, chunker_names, token_window_size=token_window_size)
 
     for chunker_name, chunks in chunkings:
         _append_candidate_if_valid(
@@ -124,58 +127,102 @@ def next_generation_from_frontier(
     population_size: int,
     proposer: RewriteProposer | None = None,
     chunker_names: tuple[str, ...] | None = None,
+    frontier_order: tuple[str, ...] | None = None,
+    elite_ids: tuple[str, ...] = (),
 ) -> list[Candidate]:
     planner = TokenizerAwareRewritePlanner(tokenizer, proposer=proposer)
-    parents = [candidate for candidate in population if candidate.id in frontier_ids] or population[:1]
+    parents = _ordered_frontier_parents(population, frontier_ids, frontier_order) or population[:1]
     children: list[Candidate] = []
     seen_prompts: set[str] = set()
 
-    for parent in parents:
-        _append_unique(children, seen_prompts, parent)
+    candidates_by_id = {candidate.id: candidate for candidate in population}
+    for elite_id in elite_ids:
+        elite = candidates_by_id.get(elite_id)
+        if elite:
+            _append_unique(children, seen_prompts, elite)
         if len(children) >= population_size:
             return children[:population_size]
-        for chunk_index, chunk in enumerate(parent.chunks):
-            if chunk.protected:
+
+    if not elite_ids:
+        for parent in parents:
+            _append_unique(children, seen_prompts, parent)
+            if len(children) >= population_size:
+                return children[:population_size]
+
+    mutation_streams = [_candidate_mutations(parent, tokenizer, planner) for parent in parents]
+    while mutation_streams and len(children) < population_size:
+        active_streams = []
+        for stream in mutation_streams:
+            try:
+                child = next(stream)
+            except StopIteration:
                 continue
-            prompt_chunk = PromptChunk(
-                id=chunk.id,
-                text=chunk.original_text,
-                chunk_type=chunk.chunk_type,
-                start_char=0,
-                end_char=len(chunk.original_text),
-                protected=chunk.protected,
-            )
-            for variant in planner.plan(prompt_chunk, BROAD_OPERATORS):
-                if variant.operator == chunk.operator:
-                    continue
-                new_chunks = list(parent.chunks)
-                new_chunks[chunk_index] = _compressed_chunk(
-                    prompt_chunk,
-                    variant.operator,
-                    variant.text,
-                    variant.token_count,
-                    variant.gloss,
-                    tokenizer,
-                )
-                operator_map = dict(parent.genome.chunk_operator_map)
-                operator_map[chunk.id] = variant.operator
-                child = _build_candidate(
-                    parent.genome.chunker_name,
-                    operator_map,
-                    new_chunks,
-                    assembly_strategy=parent.genome.assembly_strategy,
-                )
-                _append_unique(children, seen_prompts, child)
-                if len(children) >= population_size:
-                    return children[:population_size]
+            _append_unique(children, seen_prompts, child)
+            if len(children) >= population_size:
+                return children[:population_size]
+            active_streams.append(stream)
+        mutation_streams = active_streams
 
     return children[:population_size] or parents[:population_size]
+
+
+def _ordered_frontier_parents(
+    population: list[Candidate],
+    frontier_ids: set[str],
+    frontier_order: tuple[str, ...] | None,
+) -> list[Candidate]:
+    candidates_by_id = {candidate.id: candidate for candidate in population}
+    ordered_ids: list[str] = []
+    if frontier_order:
+        ordered_ids.extend(candidate_id for candidate_id in frontier_order if candidate_id in candidates_by_id)
+    ordered_ids.extend(candidate.id for candidate in population if candidate.id in frontier_ids and candidate.id not in ordered_ids)
+    return [candidates_by_id[candidate_id] for candidate_id in ordered_ids]
+
+
+def _candidate_mutations(
+    parent: Candidate,
+    tokenizer: Tokenizer,
+    planner: TokenizerAwareRewritePlanner,
+) -> Iterator[Candidate]:
+    for chunk_index, chunk in enumerate(parent.chunks):
+        if chunk.protected:
+            continue
+        prompt_chunk = PromptChunk(
+            id=chunk.id,
+            text=chunk.original_text,
+            chunk_type=chunk.chunk_type,
+            start_char=0,
+            end_char=len(chunk.original_text),
+            protected=chunk.protected,
+        )
+        for variant in planner.plan(prompt_chunk, BROAD_OPERATORS):
+            if variant.operator == chunk.operator:
+                continue
+            new_chunks = list(parent.chunks)
+            new_chunks[chunk_index] = _compressed_chunk(
+                prompt_chunk,
+                variant.operator,
+                variant.text,
+                variant.token_count,
+                variant.gloss,
+                tokenizer,
+            )
+            operator_map = dict(parent.genome.chunk_operator_map)
+            operator_map[chunk.id] = variant.operator
+            child = _build_candidate(
+                parent.genome.chunker_name,
+                operator_map,
+                new_chunks,
+                assembly_strategy=parent.genome.assembly_strategy,
+            )
+            yield child
 
 
 def describe_chunkings(
     prompt_template: str,
     tokenizer: Tokenizer,
     chunker_names: tuple[str, ...] | None = None,
+    token_window_size: int = 80,
 ) -> dict[str, dict[str, object]]:
     return {
         name: {
@@ -191,7 +238,12 @@ def describe_chunkings(
                 for chunk in chunks
             ],
         }
-        for name, chunks in _selected_chunkings(prompt_template, tokenizer, chunker_names)
+        for name, chunks in _selected_chunkings(
+            prompt_template,
+            tokenizer,
+            chunker_names,
+            token_window_size=token_window_size,
+        )
     }
 
 
@@ -199,8 +251,10 @@ def _selected_chunkings(
     prompt_template: str,
     tokenizer: Tokenizer,
     chunker_names: tuple[str, ...] | None,
+    *,
+    token_window_size: int = 80,
 ) -> list[tuple[str, list[PromptChunk]]]:
-    all_chunkings = generate_chunkings(prompt_template, tokenizer)
+    all_chunkings = generate_chunkings(prompt_template, tokenizer, token_window_size=token_window_size)
     if not chunker_names:
         return list(all_chunkings.items())
     missing = [name for name in chunker_names if name not in all_chunkings]

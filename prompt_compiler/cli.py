@@ -53,7 +53,20 @@ def main() -> int:
     )
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--population-size", type=int, default=32)
-    parser.add_argument("--input-limit", type=int, default=None, help="Use only the first N inputs from the JSONL file")
+    parser.add_argument(
+        "--example-limit",
+        "--input-limit",
+        dest="input_limit",
+        type=int,
+        default=None,
+        help="Use only the first N input examples/rows from the JSONL file",
+    )
+    parser.add_argument(
+        "--elitism-count",
+        type=int,
+        default=1,
+        help="Carry the best N ranked frontier candidates unchanged into the next epoch.",
+    )
     parser.add_argument("--require-json", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
@@ -74,6 +87,12 @@ def main() -> int:
             "Comma-separated chunkers to explore. Available: paragraph,sentence,markdown,"
             "schema_aware,instruction_role,token_window"
         ),
+    )
+    parser.add_argument(
+        "--token-window-size",
+        type=int,
+        default=80,
+        help="Max tokenizer tokens per token_window chunker chunk.",
     )
     parser.add_argument(
         "--live-log-file",
@@ -148,6 +167,8 @@ def main() -> int:
         log_to_stderr=not args.quiet,
         live_log_path=live_log_path,
         chunker_names=chunker_names,
+        token_window_size=args.token_window_size,
+        elitism_count=args.elitism_count,
     )
     print(json.dumps(result.evaluation_report.to_dict(), ensure_ascii=False, indent=2))
     print(f"best_prompt={Path(args.output_dir) / 'best_prompt.txt'}")
@@ -225,7 +246,12 @@ def _preview_candidates(
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "original_prompt.txt").write_text(prompt.text, encoding="utf-8")
-    chunking_plan = describe_chunkings(prompt.text, tokenizer=tokenizer, chunker_names=chunker_names)
+    chunking_plan = describe_chunkings(
+        prompt.text,
+        tokenizer=tokenizer,
+        chunker_names=chunker_names,
+        token_window_size=args.token_window_size,
+    )
     (output_dir / "chunking_plan.json").write_text(
         json.dumps(chunking_plan, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -236,6 +262,7 @@ def _preview_candidates(
         population_size=args.population_size,
         proposer=rewrite_proposer,
         chunker_names=chunker_names,
+        token_window_size=args.token_window_size,
     )
     candidates = _preview_candidate_subset(
         prompt=prompt,
@@ -254,6 +281,7 @@ def _preview_candidates(
         "candidate_count": len(rows),
         "preview_min_token_reduction": args.preview_min_token_reduction,
         "chunkers": list(chunking_plan),
+        "token_window_size": args.token_window_size,
         "original_prompt": str(output_dir / "original_prompt.txt"),
         "candidate_templates_jsonl": str(output_dir / "candidate_templates.jsonl"),
         "candidate_templates_markdown": str(output_dir / "candidate_templates.md"),
