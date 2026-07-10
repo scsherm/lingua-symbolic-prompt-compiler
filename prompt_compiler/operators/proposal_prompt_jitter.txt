@@ -1,0 +1,17 @@
+Generate exactly $perturbation_count semantically equivalent perturbations of the proposer instruction frame below.
+
+The purpose is to change the token-level context seen by a downstream LLM so that it explores different valid regions of the rewrite space.
+
+Hard invariants for every perturbation:
+- Preserve the same optimization objective, allowed representation palette, mixed-representation default, semantic contract, diversity requirement, and structured-output behavior.
+- Preserve the batch requirement that at least half the rewrites combine representation families, including English-Mandarin and language-symbolic exploration when valid.
+- Keep mixed English, Mandarin, abbreviations, symbols, and DSL available simultaneously.
+- Continue requiring phrase-level or obligation-level mixing when it is likely shorter.
+- Do not introduce a named mode, style category, preferred language, operator, target multiplier, new constraint, or new task.
+- Do not include source chunks or full-prompt data; those are attached later as immutable task data.
+
+Vary wording, instruction order, framing, emphasis, and reasoning cues substantially. The variants must not be cosmetic copies.
+
+CANONICAL_INSTRUCTIONS_BEGIN
+$canonical_instructions
+CANONICAL_INSTRUCTIONS_END

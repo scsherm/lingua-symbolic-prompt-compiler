@@ -1,0 +1,58 @@
+{
+  "tasks": [
+    {
+      "dataset": "data/hf/soc_generalization/incident_metadata.jsonl",
+      "prompt": "examples/soc_generalization/incident_metadata_prose.txt",
+      "prompt_variant": "prose",
+      "task": "incident_metadata"
+    },
+    {
+      "dataset": "data/hf/soc_generalization/incident_metadata.jsonl",
+      "prompt": "examples/soc_generalization/incident_metadata_contract.txt",
+      "prompt_variant": "contract",
+      "task": "incident_metadata"
+    },
+    {
+      "dataset": "data/hf/soc_generalization/incident_metadata.jsonl",
+      "prompt": "examples/soc_generalization/incident_metadata_runbook.txt",
+      "prompt_variant": "runbook",
+      "task": "incident_metadata"
+    },
+    {
+      "dataset": "data/hf/soc_generalization/raw_signal.jsonl",
+      "prompt": "examples/soc_generalization/raw_signal_prose.txt",
+      "prompt_variant": "prose",
+      "task": "raw_signal"
+    },
+    {
+      "dataset": "data/hf/soc_generalization/raw_signal.jsonl",
+      "prompt": "examples/soc_generalization/raw_signal_contract.txt",
+      "prompt_variant": "contract",
+      "task": "raw_signal"
+    },
+    {
+      "dataset": "data/hf/soc_generalization/raw_signal.jsonl",
+      "prompt": "examples/soc_generalization/raw_signal_runbook.txt",
+      "prompt_variant": "runbook",
+      "task": "raw_signal"
+    },
+    {
+      "dataset": "data/hf/soc_generalization/scoped_investigation.jsonl",
+      "prompt": "examples/soc_generalization/scoped_investigation_prose.txt",
+      "prompt_variant": "prose",
+      "task": "scoped_investigation"
+    },
+    {
+      "dataset": "data/hf/soc_generalization/scoped_investigation.jsonl",
+      "prompt": "examples/soc_generalization/scoped_investigation_contract.txt",
+      "prompt_variant": "contract",
+      "task": "scoped_investigation"
+    },
+    {
+      "dataset": "data/hf/soc_generalization/scoped_investigation.jsonl",
+      "prompt": "examples/soc_generalization/scoped_investigation_runbook.txt",
+      "prompt_variant": "runbook",
+      "task": "scoped_investigation"
+    }
+  ]
+}

@@ -61,7 +61,13 @@ def detect_chunk_type(text: str) -> ChunkType:
 
 def is_protected(text: str) -> bool:
     stripped = text.strip().lower()
-    return bool(PLACEHOLDER_RE.search(text)) or stripped in INPUT_LABELS or stripped == "response:"
+    schema_literal = stripped in {"{", "}", "[", "]"} or bool(re.match(r'^"[^"]+"\s*:', text.strip()))
+    return (
+        bool(PLACEHOLDER_RE.search(text))
+        or stripped in INPUT_LABELS
+        or stripped == "response:"
+        or schema_literal
+    )
 
 
 def placeholder_names(text: str) -> tuple[str, ...]:

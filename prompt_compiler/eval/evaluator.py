@@ -8,6 +8,8 @@ from typing import Iterable
 from prompt_compiler.candidates.candidate import Candidate
 from prompt_compiler.eval.contract_checks import OutputContract
 from prompt_compiler.eval.embedding_distance import DriftScorer, LexicalDriftScorer, normalize_distance
+from prompt_compiler.eval.llm_judge import JudgeResult, LLMSemanticJudge
+from prompt_compiler.eval.extraction_metrics import ExtractionMetrics, aggregate_extraction, score_extraction
 from prompt_compiler.models.base import GenerateParams, ModelClient
 from prompt_compiler.prompt.template import PromptTemplate
 from prompt_compiler.tokenizer import Tokenizer
@@ -16,7 +18,9 @@ from prompt_compiler.tokenizer import Tokenizer
 @dataclass(frozen=True)
 class EvaluationWeights:
     token: float = 0.50
-    embedding: float = 0.50
+    embedding: float = 0.25
+    judge: float = 0.25
+    task: float = 0.50
     semantic_drift_normalization: float = 1.0
 
 
@@ -35,6 +39,9 @@ class OutputComparison:
     semantic_drift: float
     normalized_semantic_drift: float
     equivalence_distance: float
+    judge_loss: float | None
+    judge_position_disagreement: float | None
+    judge_result: JudgeResult | None
     contract_ok: bool
     task_ok: bool
     failures: tuple[FailureCase, ...] = ()
@@ -50,6 +57,11 @@ class CandidateOutputRecord:
     equivalence_distance: float
     semantic_drift: float
     normalized_semantic_drift: float
+    judge_loss: float | None
+    judge_position_disagreement: float | None
+    judge_result: dict | None
+    reference_extraction: dict | None
+    candidate_extraction: dict | None
     model: str
     usage: dict[str, int] | None = None
     metadata: dict | None = None
@@ -72,6 +84,15 @@ class CandidateReport:
     output_records: list[CandidateOutputRecord] = field(default_factory=list)
     avg_normalized_semantic_drift: float = 0.0
     normalized_token_reduction: float = 0.0
+    avg_judge_loss: float | None = None
+    avg_judge_position_disagreement: float | None = None
+    avg_combined_semantic_loss: float = 0.0
+    reference_extraction: dict | None = None
+    candidate_extraction: dict | None = None
+    extraction_f1_delta: float | None = None
+    evaluation_profile: str = "generative"
+    token_loss: float = 0.0
+    task_loss: float | None = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -87,17 +108,38 @@ class Evaluator:
         output_contract: OutputContract | None = None,
         weights: EvaluationWeights | None = None,
         drift_scorer: DriftScorer | None = None,
+        semantic_judge: LLMSemanticJudge | None = None,
+        original_prompt: str = "",
+        evaluation_profile: str = "auto",
     ):
         self.tokenizer = tokenizer
         self.output_contract = output_contract or OutputContract()
         self.weights = weights or EvaluationWeights()
         self.drift_scorer = drift_scorer or LexicalDriftScorer()
+        self.semantic_judge = semantic_judge
+        self.original_prompt = original_prompt
+        self.evaluation_profile = evaluation_profile
 
-    def compare_outputs(self, candidate_output: str, reference_output: str, input_id: str) -> OutputComparison:
+    def compare_outputs(
+        self,
+        candidate_output: str,
+        reference_output: str,
+        input_id: str,
+        input_text: str = "",
+    ) -> OutputComparison:
         contract_result = self.output_contract.validate(candidate_output)
         semantic_drift = self.drift_scorer.distance(candidate_output, reference_output)
         normalized_semantic_drift = _normalize_drift(semantic_drift, self.drift_scorer, self.weights)
         task_ok = _task_equivalent(candidate_output, reference_output)
+        judge_result = None
+        if self.semantic_judge is not None:
+            judge_result = self.semantic_judge.judge(
+                original_prompt=self.original_prompt,
+                input_text=input_text,
+                reference_output=reference_output,
+                candidate_output=candidate_output,
+                input_id=input_id,
+            )
 
         failures: list[FailureCase] = []
         if not contract_result.ok:
@@ -121,13 +163,20 @@ class Evaluator:
                 )
             )
 
-        equivalence_distance = normalized_semantic_drift
+        equivalence_distance = _combined_semantic_loss(
+            normalized_semantic_drift,
+            judge_result.loss if judge_result else None,
+            self.weights,
+        )
 
         return OutputComparison(
             input_id=input_id,
             semantic_drift=semantic_drift,
             normalized_semantic_drift=normalized_semantic_drift,
             equivalence_distance=equivalence_distance,
+            judge_loss=judge_result.loss if judge_result else None,
+            judge_position_disagreement=judge_result.position_disagreement if judge_result else None,
+            judge_result=judge_result,
             contract_ok=contract_result.ok,
             task_ok=task_ok,
             failures=tuple(failures),
@@ -145,13 +194,30 @@ class Evaluator:
         prompt = PromptTemplate(candidate.prompt_template)
         comparisons: list[OutputComparison] = []
         output_records: list[CandidateOutputRecord] = []
+        reference_extraction_metrics: list[ExtractionMetrics] = []
+        candidate_extraction_metrics: list[ExtractionMetrics] = []
         usage_summary: dict[str, int] = {}
         for reference in references:
             rendered = prompt.render({"input": reference.input_text})
             response = model.generate(rendered, params)
             _add_usage(usage_summary, response.usage)
-            comparison = self.compare_outputs(response.text, reference.reference_output, reference.id)
+            comparison = self.compare_outputs(
+                response.text,
+                reference.reference_output,
+                reference.id,
+                reference.input_text,
+            )
             comparisons.append(comparison)
+            expected = (reference.metadata or {}).get("expected")
+            reference_extraction = None
+            candidate_extraction = None
+            if isinstance(expected, dict):
+                reference_metric = score_extraction(reference.reference_output, expected)
+                candidate_metric = score_extraction(response.text, expected)
+                reference_extraction_metrics.append(reference_metric)
+                candidate_extraction_metrics.append(candidate_metric)
+                reference_extraction = reference_metric.to_dict()
+                candidate_extraction = candidate_metric.to_dict()
             output_records.append(
                 CandidateOutputRecord(
                     candidate_id=candidate.id,
@@ -162,6 +228,11 @@ class Evaluator:
                     equivalence_distance=comparison.equivalence_distance,
                     semantic_drift=comparison.semantic_drift,
                     normalized_semantic_drift=comparison.normalized_semantic_drift,
+                    judge_loss=comparison.judge_loss,
+                    judge_position_disagreement=comparison.judge_position_disagreement,
+                    judge_result=comparison.judge_result.to_dict() if comparison.judge_result else None,
+                    reference_extraction=reference_extraction,
+                    candidate_extraction=candidate_extraction,
                     model=response.model,
                     usage=response.usage,
                     metadata=response.metadata,
@@ -182,11 +253,35 @@ class Evaluator:
         avg_normalized_drift = (
             mean([comparison.normalized_semantic_drift for comparison in comparisons]) if comparisons else 1.0
         )
-        objective_score = _weighted_loss(
-            token_loss=1.0 - normalized_token_reduction,
-            normalized_semantic_drift=avg_normalized_drift,
-            weights=self.weights,
-        )
+        judge_losses = [item.judge_loss for item in comparisons if item.judge_loss is not None]
+        judge_disagreements = [
+            item.judge_position_disagreement
+            for item in comparisons
+            if item.judge_position_disagreement is not None
+        ]
+        avg_judge_loss = mean(judge_losses) if judge_losses else None
+        avg_judge_disagreement = mean(judge_disagreements) if judge_disagreements else None
+        avg_combined_semantic_loss = _combined_semantic_loss(avg_normalized_drift, avg_judge_loss, self.weights)
+        reference_extraction = aggregate_extraction(reference_extraction_metrics)
+        candidate_extraction = aggregate_extraction(candidate_extraction_metrics)
+        extraction_f1_delta = None
+        if reference_extraction is not None and candidate_extraction is not None:
+            extraction_f1_delta = float(candidate_extraction["f1"]) - float(reference_extraction["f1"])
+        token_loss = 1.0 - normalized_token_reduction
+        profile = self.evaluation_profile
+        if profile == "auto":
+            profile = "extraction" if candidate_extraction is not None else "generative"
+        task_loss = None
+        if profile == "extraction":
+            task_loss = 1.0 - float((candidate_extraction or {}).get("f1", 0.0))
+            objective_score = _extraction_loss(token_loss=token_loss, task_loss=task_loss, weights=self.weights)
+        else:
+            objective_score = _weighted_loss(
+                token_loss=token_loss,
+                normalized_semantic_drift=avg_normalized_drift,
+                judge_loss=avg_judge_loss,
+                weights=self.weights,
+            )
 
         return CandidateReport(
             candidate_id=candidate.id,
@@ -204,6 +299,15 @@ class Evaluator:
             usage_summary=usage_summary,
             output_records=output_records,
             avg_normalized_semantic_drift=avg_normalized_drift,
+            avg_judge_loss=avg_judge_loss,
+            avg_judge_position_disagreement=avg_judge_disagreement,
+            avg_combined_semantic_loss=avg_combined_semantic_loss,
+            reference_extraction=reference_extraction,
+            candidate_extraction=candidate_extraction,
+            extraction_f1_delta=extraction_f1_delta,
+            evaluation_profile=profile,
+            token_loss=token_loss,
+            task_loss=task_loss,
         )
 
 
@@ -243,12 +347,37 @@ def _weighted_loss(
     *,
     token_loss: float,
     normalized_semantic_drift: float,
+    judge_loss: float | None,
     weights: EvaluationWeights,
 ) -> float:
-    weight_sum = weights.token + weights.embedding
+    judge_weight = weights.judge if judge_loss is not None else 0.0
+    weight_sum = weights.token + weights.embedding + judge_weight
     if weight_sum <= 0.0:
         return 1.0
-    return ((weights.token * token_loss) + (weights.embedding * normalized_semantic_drift)) / weight_sum
+    return (
+        (weights.token * token_loss)
+        + (weights.embedding * normalized_semantic_drift)
+        + (judge_weight * (judge_loss or 0.0))
+    ) / weight_sum
+
+
+def _combined_semantic_loss(
+    normalized_semantic_drift: float,
+    judge_loss: float | None,
+    weights: EvaluationWeights,
+) -> float:
+    judge_weight = weights.judge if judge_loss is not None else 0.0
+    weight_sum = weights.embedding + judge_weight
+    if weight_sum <= 0:
+        return 1.0
+    return ((weights.embedding * normalized_semantic_drift) + (judge_weight * (judge_loss or 0.0))) / weight_sum
+
+
+def _extraction_loss(*, token_loss: float, task_loss: float, weights: EvaluationWeights) -> float:
+    weight_sum = weights.token + weights.task
+    if weight_sum <= 0:
+        return 1.0
+    return ((weights.token * token_loss) + (weights.task * task_loss)) / weight_sum
 
 
 def _clamp(value: float) -> float:

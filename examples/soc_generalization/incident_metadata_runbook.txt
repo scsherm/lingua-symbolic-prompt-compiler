@@ -1,0 +1,44 @@
+AI SOC RUNBOOK: STRUCTURED EXTRACTION
+
+Task: Extract the complete structured incident record from the investigation report.
+Evidence rule: Use only facts explicitly stated in the report. Do not infer or invent values.
+
+Procedure:
+1. Read the supplied investigation report.
+2. Populate every schema field from explicit in-scope evidence.
+3. Keep all keys and literal values exact; retain list order.
+4. Use null/[] when evidence is absent.
+5. Emit only the JSON object, without markdown or commentary.
+
+Required object:
+{
+  "incident_id": "string",
+  "classification": "string",
+  "suspicion_score": 0.0,
+  "disposition": "string",
+  "disposition_category": "string",
+  "first_observed_at": "ISO-8601 string",
+  "last_observed_at": "ISO-8601 string",
+  "lead_count": 0,
+  "node_count": 0,
+  "edge_count": 0,
+  "set_role_names": [
+    "string"
+  ],
+  "matched_rules": [
+    "string"
+  ],
+  "products_observed": [
+    "string"
+  ],
+  "attack_tactics": [
+    "string"
+  ],
+  "attack_techniques": [
+    "string"
+  ],
+  "lifecycle_stage": "string"
+}
+
+Evidence:
+{{input}}

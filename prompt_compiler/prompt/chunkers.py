@@ -151,7 +151,7 @@ def _append_obligation_line(chunks: list[PromptChunk], prefix: str, text: str, s
             )
         return
 
-    sentence_spans = list(re.finditer(r"[^.!?]+[.!?]?", text))
+    sentence_spans = list(re.finditer(r".+?(?:[.!?](?=\s|$)|$)", text))
     if len([span for span in sentence_spans if span.group(0).strip()]) <= 1:
         chunks.append(_make_chunk(prefix, len(chunks), text, start, start + len(text)))
         return
@@ -284,6 +284,7 @@ class ObligationChunker:
     def chunk(self, prompt: str) -> list[PromptChunk]:
         chunks: list[PromptChunk] = []
         cursor = 0
+        schema_depth = 0
         for line in prompt.splitlines(keepends=True):
             line_start = cursor
             cursor += len(line)
@@ -291,6 +292,22 @@ class ObligationChunker:
             if not stripped:
                 continue
             content_start = line_start + line.find(stripped)
+            if schema_depth > 0 or stripped in {"{", "["}:
+                schema_depth += stripped.count("{") + stripped.count("[")
+                schema_depth -= stripped.count("}") + stripped.count("]")
+                base = _make_chunk(self.name, len(chunks), stripped, content_start, content_start + len(stripped))
+                chunks.append(
+                    PromptChunk(
+                        id=base.id,
+                        text=base.text,
+                        chunk_type=base.chunk_type,
+                        start_char=base.start_char,
+                        end_char=base.end_char,
+                        protected=True,
+                    )
+                )
+                schema_depth = max(schema_depth, 0)
+                continue
             _append_obligation_line(chunks, self.name, stripped, content_start)
         return chunks
 

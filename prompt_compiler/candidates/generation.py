@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
@@ -25,17 +26,17 @@ class CandidateBuildError(RuntimeError):
 
 BROAD_OPERATORS = (
     RewriteOperator.KEEP,
-    RewriteOperator.SHORT_ENGLISH,
-    RewriteOperator.TELEGRAPH_ENGLISH,
+    RewriteOperator.MIXED_MIN_TOKEN_FORM,
+    RewriteOperator.MANDARIN_SYMBOLIC,
+    RewriteOperator.BILINGUAL_DSL,
+    RewriteOperator.HYBRID_SYMBOLIC_ENGLISH,
     RewriteOperator.SYMBOLIC_DSL,
     RewriteOperator.SCHEMA_ABBREVIATION,
-    RewriteOperator.HYBRID_SYMBOLIC_ENGLISH,
+    RewriteOperator.TELEGRAPH_ENGLISH,
+    RewriteOperator.SHORT_ENGLISH,
     RewriteOperator.SHORT_MANDARIN,
     RewriteOperator.FORMAL_CHINESE,
     RewriteOperator.CLASSICAL_CHINESE_LIKE,
-    RewriteOperator.MANDARIN_SYMBOLIC,
-    RewriteOperator.BILINGUAL_DSL,
-    RewriteOperator.MIXED_MIN_TOKEN_FORM,
 )
 
 MULTILINGUAL_OPERATORS = {
@@ -94,10 +95,19 @@ def seed_population_with_proposals(
     proposal_attempts: int = 1,
     proposal_jitter_seed: int = 0,
 ) -> SeedPopulationResult:
+    chunkings = _selected_chunkings(prompt_template, tokenizer, chunker_names, token_window_size=token_window_size)
+    if proposer is not None and callable(getattr(proposer, "propose_chunk", None)):
+        return _seed_open_proposal_population(
+            chunkings=chunkings,
+            tokenizer=tokenizer,
+            population_size=population_size,
+            proposer=proposer,
+            seed=proposal_jitter_seed,
+        )
+
     planner = TokenizerAwareRewritePlanner(tokenizer, proposer=proposer)
     population: list[Candidate] = []
     seen_prompts: set[str] = set()
-    chunkings = _selected_chunkings(prompt_template, tokenizer, chunker_names, token_window_size=token_window_size)
     attempts = make_rewrite_attempts(proposal_attempts, seed=proposal_jitter_seed)
     pools = [ChunkProposalPool(chunker_name=name, chunks=tuple(chunks)) for name, chunks in chunkings]
 
@@ -182,6 +192,143 @@ def seed_population_with_proposals(
         if len(population) >= population_size:
             return SeedPopulationResult(population, tuple(pools))
     return SeedPopulationResult(population[:population_size], tuple(pools))
+
+
+def _seed_open_proposal_population(
+    *,
+    chunkings: list[tuple[str, list[PromptChunk]]],
+    tokenizer: Tokenizer,
+    population_size: int,
+    proposer: RewriteProposer,
+    seed: int,
+) -> SeedPopulationResult:
+    pools = [ChunkProposalPool(chunker_name=name, chunks=tuple(chunks)) for name, chunks in chunkings]
+    for pool in pools:
+        for chunk in pool.chunks:
+            variants = list(proposer.propose_chunk(chunk))
+            if not variants:
+                variants = [
+                    RewriteVariant(
+                        operator=RewriteOperator.KEEP,
+                        text=chunk.text,
+                        token_count=tokenizer.count(chunk.text),
+                        gloss="original retained because no valid shorter proposal was available",
+                        attempt_id="keep_fallback",
+                    )
+                ]
+            pool.variants_by_chunk[chunk.id] = variants
+            pool.attempted.add((chunk.id, "open_mixed_pool"))
+
+    candidate_pool: list[Candidate] = []
+    seen_prompts: set[str] = set()
+    rng = random.Random(seed)
+    for pool in pools:
+        max_rank = max((len(pool.variants_by_chunk.get(chunk.id, [])) for chunk in pool.chunks), default=0)
+        rank_orders = list(range(max_rank))
+        rng.shuffle(rank_orders)
+        rank_orders.sort(key=lambda rank: rank != 0)
+        for rank in rank_orders:
+            _append_candidate_if_valid(
+                candidate_pool,
+                seen_prompts,
+                lambda pool=pool, rank=rank: _candidate_from_open_pool(pool, tokenizer, rank, offset=False),
+            )
+        for _ in range(max(population_size * 12, 24)):
+            _append_candidate_if_valid(
+                candidate_pool,
+                seen_prompts,
+                lambda pool=pool: _candidate_from_open_choices(
+                    pool,
+                    tokenizer,
+                    {
+                        chunk.id: rng.randrange(max(len(pool.variants_by_chunk.get(chunk.id, [])), 1))
+                        for chunk in pool.chunks
+                    },
+                ),
+            )
+
+    population = _select_diverse_candidates(candidate_pool, population_size)
+    return SeedPopulationResult(population, tuple(pools))
+
+
+def _candidate_from_open_pool(
+    pool: ChunkProposalPool,
+    tokenizer: Tokenizer,
+    rank: int,
+    *,
+    offset: bool,
+) -> Candidate:
+    compressed: list[CompressedChunk] = []
+    operator_map: dict[str, RewriteOperator] = {}
+    for index, chunk in enumerate(pool.chunks):
+        variants = pool.variants_by_chunk.get(chunk.id, [])
+        if not variants:
+            raise CandidateBuildError(f"no valid open proposals for {chunk.id}")
+        selected_rank = (rank + index) if offset else rank
+        variant = variants[selected_rank % len(variants)]
+        operator_map[chunk.id] = variant.operator
+        compressed.append(
+            _compressed_chunk(
+                chunk,
+                variant.operator,
+                variant.text,
+                variant.token_count,
+                variant.gloss,
+                tokenizer,
+            )
+        )
+    return _build_candidate(pool.chunker_name, operator_map, compressed)
+
+
+def _candidate_from_open_choices(
+    pool: ChunkProposalPool,
+    tokenizer: Tokenizer,
+    choices: dict[str, int],
+) -> Candidate:
+    compressed: list[CompressedChunk] = []
+    operator_map: dict[str, RewriteOperator] = {}
+    for chunk in pool.chunks:
+        variants = pool.variants_by_chunk.get(chunk.id, [])
+        if not variants:
+            raise CandidateBuildError(f"no valid open proposals for {chunk.id}")
+        variant = variants[choices.get(chunk.id, 0) % len(variants)]
+        operator_map[chunk.id] = variant.operator
+        compressed.append(
+            _compressed_chunk(chunk, variant.operator, variant.text, variant.token_count, variant.gloss, tokenizer)
+        )
+    return _build_candidate(pool.chunker_name, operator_map, compressed)
+
+
+def _select_diverse_candidates(candidates: list[Candidate], limit: int) -> list[Candidate]:
+    if len(candidates) <= limit:
+        return candidates
+    remaining = list(candidates)
+    selected = [min(remaining, key=_candidate_compressed_tokens)]
+    remaining.remove(selected[0])
+    while remaining and len(selected) < limit:
+        choice = max(
+            remaining,
+            key=lambda candidate: (
+                min(_candidate_chunk_distance(candidate, existing) for existing in selected),
+                -_candidate_compressed_tokens(candidate),
+            ),
+        )
+        selected.append(choice)
+        remaining.remove(choice)
+    return selected
+
+
+def _candidate_chunk_distance(left: Candidate, right: Candidate) -> float:
+    left_chunks = {chunk.id: chunk.text for chunk in left.chunks if not chunk.protected}
+    right_chunks = {chunk.id: chunk.text for chunk in right.chunks if not chunk.protected}
+    chunk_ids = set(left_chunks) | set(right_chunks)
+    if not chunk_ids:
+        return 0.0
+    return sum(left_chunks.get(chunk_id) != right_chunks.get(chunk_id) for chunk_id in chunk_ids) / len(chunk_ids)
+
+
+def _candidate_compressed_tokens(candidate: Candidate) -> int:
+    return sum(chunk.compressed_tokens for chunk in candidate.chunks)
 
 
 def next_generation_from_frontier(
@@ -485,8 +632,6 @@ def _build_candidate(
             "assembled prompt changed placeholder boundary: "
             f"original={original_placeholders}, assembled={assembled_placeholders}"
         )
-    if _needs_output_language_guard(operator_map) and "out_lang=EN" not in prompt:
-        prompt = f"out_lang=EN\n{prompt}"
     genome = CandidateGenome(
         chunker_name=chunker_name,
         chunk_operator_map=operator_map,

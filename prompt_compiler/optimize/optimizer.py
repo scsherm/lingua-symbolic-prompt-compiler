@@ -14,6 +14,7 @@ from prompt_compiler.data.splits import split_dataset
 from prompt_compiler.eval.contract_checks import OutputContract
 from prompt_compiler.eval.embedding_distance import DriftScorer
 from prompt_compiler.eval.evaluator import CandidateReport, EvaluationWeights, Evaluator
+from prompt_compiler.eval.llm_judge import LLMSemanticJudge
 from prompt_compiler.eval.pareto import compute_pareto_frontier
 from prompt_compiler.models.base import GenerateParams, ModelClient
 from prompt_compiler.observability import RunLogger
@@ -32,13 +33,26 @@ class EvaluationReport:
     best_instruction_tokens: int
     token_reduction: float
     semantic_drift_normalization: float
+    judge_calibration_floor: float | None
+    judge_calibration_ceiling: float | None
     dev_semantic_drift: float
     dev_normalized_semantic_drift: float
+    dev_judge_loss: float | None
+    dev_judge_position_disagreement: float | None
+    dev_combined_semantic_loss: float
+    dev_reference_extraction: dict | None
+    dev_candidate_extraction: dict | None
+    dev_extraction_f1_delta: float | None
     dev_loss: float
     dev_format_failure_rate: float
     dev_task_failure_rate: float
     holdout_semantic_drift: float | None
     holdout_normalized_semantic_drift: float | None
+    holdout_judge_loss: float | None
+    holdout_combined_semantic_loss: float | None
+    holdout_reference_extraction: dict | None
+    holdout_candidate_extraction: dict | None
+    holdout_extraction_f1_delta: float | None
     holdout_loss: float | None
     holdout_format_failure_rate: float | None
     holdout_task_failure_rate: float | None
@@ -96,6 +110,8 @@ def optimize_prompt(
     elitism_count: int = 1,
     proposal_attempts: int = 1,
     proposal_jitter_seed: int = 0,
+    semantic_judge: LLMSemanticJudge | None = None,
+    evaluation_profile: str = "auto",
 ) -> CompressionRunResult:
     tokenizer = tokenizer or ApproxTokenizer()
     params = params or GenerateParams()
@@ -120,6 +136,8 @@ def optimize_prompt(
         proposal_attempts=proposal_attempts,
         proposal_jitter_seed=proposal_jitter_seed,
         semantic_drift_normalization=(evaluation_weights or EvaluationWeights()).semantic_drift_normalization,
+        judge_model=semantic_judge.model.config() if semantic_judge else None,
+        evaluation_profile=evaluation_profile,
     )
 
     logger.event("reference_build_start", example_count=len(normalized_inputs))
@@ -131,6 +149,14 @@ def optimize_prompt(
         params=params,
     )
     reference_usage = _reference_usage(references)
+    judge_calibration = None
+    if semantic_judge is not None:
+        logger.event("judge_calibration_start", reference_count=len(references))
+        judge_calibration = semantic_judge.calibrate(
+            original_prompt=original_prompt.text,
+            references=references,
+        )
+        logger.event("judge_calibration_done", calibration=judge_calibration)
     logger.event(
         "reference_build_done",
         reference_count=len(references),
@@ -152,6 +178,9 @@ def optimize_prompt(
         output_contract=output_contract,
         weights=evaluation_weights,
         drift_scorer=drift_scorer,
+        semantic_judge=semantic_judge,
+        original_prompt=original_prompt.text,
+        evaluation_profile=evaluation_profile,
     )
     chunking_plan = describe_chunkings(
         original_prompt.text,
@@ -199,7 +228,7 @@ def optimize_prompt(
     epoch_reports: list[CandidateReport] = []
     all_evaluated_reports: list[CandidateReport] = []
     for epoch in range(max(epochs, 1)):
-        subset = curriculum_subset(split.train, epoch)
+        subset = list(split.train) if evaluation_profile == "extraction" else curriculum_subset(split.train, epoch)
         logger.event(
             "epoch_start",
             epoch=epoch,
@@ -255,19 +284,23 @@ def optimize_prompt(
 
     finalists = compute_pareto_frontier(epoch_reports)
     dev_candidates = [_candidate_by_id(candidate_index, report.candidate_id) for report in finalists if report.candidate_id in candidate_index]
-    logger.event("dev_start", candidate_count=len(dev_candidates), example_count=len(dev_set))
-    dev_reports = _evaluate_population(
-        population=dev_candidates,
-        evaluator=evaluator,
-        model=target_model,
-        references=dev_set,
-        original_instruction_tokens=original_instruction_tokens,
-        params=params,
-        max_concurrency=max_concurrency,
-        logger=logger,
-        stage="dev",
-        epoch=None,
-    )
+    if split.validation:
+        logger.event("dev_start", candidate_count=len(dev_candidates), example_count=len(dev_set))
+        dev_reports = _evaluate_population(
+            population=dev_candidates,
+            evaluator=evaluator,
+            model=target_model,
+            references=dev_set,
+            original_instruction_tokens=original_instruction_tokens,
+            params=params,
+            max_concurrency=max_concurrency,
+            logger=logger,
+            stage="dev",
+            epoch=None,
+        )
+    else:
+        dev_reports = finalists
+        logger.event("dev_reused_train", reason="no_distinct_validation_rows", candidate_count=len(dev_reports))
     final_reports = dev_reports or finalists
     dev_frontier = compute_pareto_frontier(final_reports)
     best = _choose_best(dev_frontier or final_reports)
@@ -302,13 +335,26 @@ def optimize_prompt(
         best_instruction_tokens=best.instruction_tokens,
         token_reduction=best.token_reduction,
         semantic_drift_normalization=(evaluation_weights or EvaluationWeights()).semantic_drift_normalization,
+        judge_calibration_floor=judge_calibration["floor"] if judge_calibration else None,
+        judge_calibration_ceiling=judge_calibration["ceiling"] if judge_calibration else None,
         dev_semantic_drift=best.avg_semantic_drift,
         dev_normalized_semantic_drift=best.avg_normalized_semantic_drift,
+        dev_judge_loss=best.avg_judge_loss,
+        dev_judge_position_disagreement=best.avg_judge_position_disagreement,
+        dev_combined_semantic_loss=best.avg_combined_semantic_loss,
+        dev_reference_extraction=best.reference_extraction,
+        dev_candidate_extraction=best.candidate_extraction,
+        dev_extraction_f1_delta=best.extraction_f1_delta,
         dev_loss=best.objective_score,
         dev_format_failure_rate=best.format_failure_rate,
         dev_task_failure_rate=best.task_failure_rate,
         holdout_semantic_drift=best_holdout.avg_semantic_drift if best_holdout else None,
         holdout_normalized_semantic_drift=best_holdout.avg_normalized_semantic_drift if best_holdout else None,
+        holdout_judge_loss=best_holdout.avg_judge_loss if best_holdout else None,
+        holdout_combined_semantic_loss=best_holdout.avg_combined_semantic_loss if best_holdout else None,
+        holdout_reference_extraction=best_holdout.reference_extraction if best_holdout else None,
+        holdout_candidate_extraction=best_holdout.candidate_extraction if best_holdout else None,
+        holdout_extraction_f1_delta=best_holdout.extraction_f1_delta if best_holdout else None,
         holdout_loss=best_holdout.objective_score if best_holdout else None,
         holdout_format_failure_rate=best_holdout.format_failure_rate if best_holdout else None,
         holdout_task_failure_rate=best_holdout.task_failure_rate if best_holdout else None,
@@ -363,7 +409,10 @@ def _rank_reports(reports: list[CandidateReport]) -> list[CandidateReport]:
         key=lambda item: (
             item.format_failure_rate,
             item.task_failure_rate,
+            -float((item.candidate_extraction or {}).get("schema_valid_rate", 1.0)),
             item.objective_score,
+            -float((item.candidate_extraction or {}).get("f1", 0.0)),
+            -float((item.candidate_extraction or {}).get("exact_match_rate", 0.0)),
             -item.token_reduction,
         ),
     )

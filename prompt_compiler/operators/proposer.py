@@ -27,9 +27,7 @@ class RewriteVariant:
 @dataclass(frozen=True)
 class RewriteAttempt:
     id: str
-    target_multiplier: float = 1.0
-    aggression: str = "medium"
-    style_hint: str = "Use the operator's default compression style."
+    prompt_template_name: str = "llm_chunk_rewrite_prompt.txt"
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -37,46 +35,8 @@ class RewriteAttempt:
 
 DEFAULT_REWRITE_ATTEMPT = RewriteAttempt(id="default")
 
-JITTER_ATTEMPT_POOL = (
-    RewriteAttempt(
-        id="compact_symbols",
-        target_multiplier=0.85,
-        aggression="medium",
-        style_hint="Prefer compact operators like =>, ;, /, +, no_*, preserve, unless.",
-    ),
-    RewriteAttempt(
-        id="aggressive_short",
-        target_multiplier=0.70,
-        aggression="aggressive",
-        style_hint="Prefer the shortest clear wording; allow terse grammar and stable abbreviations.",
-    ),
-    RewriteAttempt(
-        id="conservative_exact",
-        target_multiplier=1.10,
-        aggression="conservative",
-        style_hint="Compress less aggressively; preserve explicit wording when ambiguity risk is high.",
-    ),
-    RewriteAttempt(
-        id="abbrev_heavy",
-        target_multiplier=0.80,
-        aggression="medium",
-        style_hint="Favor stable abbreviations such as req, fmt, len, EN, out, info.",
-    ),
-    RewriteAttempt(
-        id="dsl_dense",
-        target_multiplier=0.65,
-        aggression="aggressive",
-        style_hint="Favor compact DSL-like notation with clear keys and constraints.",
-    ),
-)
-
-
 def make_rewrite_attempts(count: int, seed: int = 0) -> tuple[RewriteAttempt, ...]:
-    if count <= 1:
-        return (DEFAULT_REWRITE_ATTEMPT,)
-    pool = list(JITTER_ATTEMPT_POOL)
-    random.Random(seed).shuffle(pool)
-    return (DEFAULT_REWRITE_ATTEMPT, *pool[: max(0, count - 1)])
+    return (DEFAULT_REWRITE_ATTEMPT,)
 
 
 class RewriteProposer(Protocol):
@@ -93,6 +53,38 @@ REWRITE_JSON_SCHEMA = {
         "risk_notes": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["rewritten_chunk", "rationale", "risk_notes"],
+}
+
+PROMPT_PERTURBATION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "perturbations": {
+            "type": "array",
+            "items": {"type": "string"},
+        }
+    },
+    "required": ["perturbations"],
+}
+
+MIXED_REWRITE_BATCH_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "rewritten_chunk": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["rewritten_chunk", "rationale"],
+            },
+        }
+    },
+    "required": ["candidates"],
 }
 
 
@@ -422,7 +414,19 @@ class LLMRewriteProposer:
         default_factory=lambda: Path(__file__).with_name("llm_chunk_rewrite_prompt.txt")
     )
     fallback: RewriteProposer | None = None
+    prompt_perturbations: int = 2
+    rewrites_per_prompt: int = 4
+    proposal_pool_limit: int = 12
+    jitter_seed: int = 0
+    mixed_instructions_path: Path = field(
+        default_factory=lambda: Path(__file__).with_name("mixed_proposal_instructions.txt")
+    )
+    jitter_prompt_path: Path = field(
+        default_factory=lambda: Path(__file__).with_name("proposal_prompt_jitter.txt")
+    )
     _cache: dict[tuple[str, str, str, str], tuple[str, str]] = field(default_factory=dict, init=False, repr=False)
+    _mixed_cache: dict[tuple[str, str], tuple[RewriteVariant, ...]] = field(default_factory=dict, init=False, repr=False)
+    _instruction_frames: tuple[tuple[str, str], ...] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.params.response_json_schema:
@@ -435,6 +439,169 @@ class LLMRewriteProposer:
 
     def rewrite(self, chunk: PromptChunk, operator: RewriteOperator) -> tuple[str, str]:
         return self.rewrite_attempt(chunk, operator, DEFAULT_REWRITE_ATTEMPT)
+
+    def propose_chunk(self, chunk: PromptChunk) -> list[RewriteVariant]:
+        """Generate an open pool of mixed-representation rewrites without an operator input."""
+        if chunk.protected:
+            return [
+                RewriteVariant(
+                    operator=RewriteOperator.KEEP,
+                    text=chunk.text,
+                    token_count=self.tokenizer.count(chunk.text),
+                    gloss="protected input slot preserved verbatim",
+                    attempt_id="protected",
+                )
+            ]
+        cache_key = (chunk.text, chunk.chunk_type.value)
+        if cache_key in self._mixed_cache:
+            return list(self._mixed_cache[cache_key])
+
+        variants: list[RewriteVariant] = []
+        seen: set[str] = set()
+        for frame_id, instructions in self._get_instruction_frames():
+            proposer_prompt = self._render_mixed_prompt(chunk, instructions)
+            params = replace(
+                self.params,
+                response_json_schema=MIXED_REWRITE_BATCH_SCHEMA,
+                response_json_schema_name="mixed_prompt_chunk_rewrites",
+            )
+            response = self.model.generate(proposer_prompt, params)
+            parsed = _extract_json_object(response.text)
+            accepted: list[dict[str, str]] = []
+            rejected: list[dict[str, str]] = []
+            rows = parsed.get("candidates", [])
+            for index, row in enumerate(rows if isinstance(rows, list) else []):
+                if not isinstance(row, dict):
+                    continue
+                rewritten = str(row.get("rewritten_chunk", "")).strip()
+                rationale = str(row.get("rationale", "")).strip() or "mixed proposal"
+                error = self._validate_rewrite(chunk, rewritten)
+                normalized = _normalize_rewrite_text(rewritten)
+                if not error and self.tokenizer.count(rewritten) >= self.tokenizer.count(chunk.text):
+                    error = "not_shorter"
+                if not error and normalized in seen:
+                    error = "duplicate"
+                if error:
+                    rejected.append({"rewritten_chunk": rewritten, "reason": error})
+                    continue
+                seen.add(normalized)
+                accepted.append({"rewritten_chunk": rewritten, "rationale": rationale})
+                variants.append(
+                    RewriteVariant(
+                        operator=RewriteOperator.MIXED_MIN_TOKEN_FORM,
+                        text=rewritten,
+                        token_count=self.tokenizer.count(rewritten),
+                        gloss=rationale,
+                        attempt_id=f"{frame_id}:{index}",
+                        jitter={"instruction_frame_id": frame_id},
+                    )
+                )
+            self._write_mixed_trace(
+                chunk=chunk,
+                frame_id=frame_id,
+                instructions=instructions,
+                proposer_prompt=proposer_prompt,
+                response_text=response.text,
+                parsed=parsed,
+                accepted=accepted,
+                rejected=rejected,
+                usage=response.usage,
+                response_metadata=response.metadata,
+            )
+
+        ordered = sorted(variants, key=lambda item: (item.token_count, item.attempt_id))
+        result = tuple(ordered[: max(1, self.proposal_pool_limit)])
+        self._mixed_cache[cache_key] = result
+        return list(result)
+
+    def _get_instruction_frames(self) -> tuple[tuple[str, str], ...]:
+        if self._instruction_frames is not None:
+            return self._instruction_frames
+        canonical = self.mixed_instructions_path.read_text(encoding="utf-8").strip()
+        frames: list[tuple[str, str]] = [("canonical", canonical)]
+        requested = max(0, self.prompt_perturbations)
+        if requested:
+            jitter_template = Template(self.jitter_prompt_path.read_text(encoding="utf-8"))
+            jitter_prompt = jitter_template.safe_substitute(
+                perturbation_count=requested,
+                canonical_instructions=canonical,
+            )
+            params = replace(
+                self.params,
+                response_json_schema=PROMPT_PERTURBATION_SCHEMA,
+                response_json_schema_name="proposer_prompt_perturbations",
+            )
+            response = self.model.generate(jitter_prompt, params)
+            parsed = _extract_json_object(response.text)
+            values = parsed.get("perturbations", [])
+            unique = {canonical}
+            generated: list[str] = []
+            for value in values if isinstance(values, list) else []:
+                text = str(value).strip()
+                if not text or text in unique:
+                    continue
+                unique.add(text)
+                generated.append(text)
+            random.Random(self.jitter_seed).shuffle(generated)
+            frames.extend((f"jitter_{index + 1}", text) for index, text in enumerate(generated[:requested]))
+            self._write_prompt_jitter_trace(jitter_prompt, response.text, parsed, frames, response.usage, response.metadata)
+        self._instruction_frames = tuple(frames)
+        return self._instruction_frames
+
+    def _render_mixed_prompt(self, chunk: PromptChunk, instructions: str) -> str:
+        source_tokens = self.tokenizer.count(chunk.text)
+        target_tokens = max(1, source_tokens - 1)
+        return (
+            f"{instructions}\n\n"
+            "IMMUTABLE TASK DATA\n"
+            f"TARGET_MODEL_TOKENIZER: {self.target_model_name}\n"
+            f"CHUNK_TYPE: {chunk.chunk_type.value}\n"
+            f"SOURCE_TOKENS: {source_tokens}\n"
+            f"EACH_REWRITE_MUST_USE_AT_MOST: {target_tokens}\n"
+            f"REWRITES_REQUESTED: {max(1, self.rewrites_per_prompt)}\n\n"
+            "FULL_PROMPT_CONTEXT_BEGIN\n"
+            f"{self.original_prompt}\n"
+            "FULL_PROMPT_CONTEXT_END\n\n"
+            "SOURCE_CHUNK_BEGIN\n"
+            f"{chunk.text}\n"
+            "SOURCE_CHUNK_END\n"
+        )
+
+    def _write_prompt_jitter_trace(self, prompt, response, parsed, frames, usage, metadata) -> None:
+        if not self.trace_path:
+            return
+        self.trace_path.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "trace_type": "prompt_perturbation",
+            "proposer_model": self.model.name,
+            "jitter_prompt": prompt,
+            "jitter_response": response,
+            "parsed_response": parsed,
+            "instruction_frames": [{"id": key, "text": value} for key, value in frames],
+            "usage": usage,
+            "response_metadata": metadata,
+        }
+        with self.trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+    def _write_mixed_trace(self, **row) -> None:
+        if not self.trace_path:
+            return
+        self.trace_path.parent.mkdir(parents=True, exist_ok=True)
+        chunk = row.pop("chunk")
+        payload = {
+            "trace_type": "mixed_proposal_batch",
+            "proposer_model": self.model.name,
+            "target_model_name": self.target_model_name,
+            **row,
+        }
+        payload["chunk"] = {
+            "id": chunk.id,
+            "type": chunk.chunk_type.value,
+            "text": chunk.text,
+        }
+        with self.trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
     def rewrite_attempt(self, chunk: PromptChunk, operator: RewriteOperator, attempt: RewriteAttempt) -> tuple[str, str]:
         if chunk.protected:
@@ -493,15 +660,14 @@ class LLMRewriteProposer:
         *,
         attempt: RewriteAttempt = DEFAULT_REWRITE_ATTEMPT,
     ) -> str:
-        template = Template(self.prompt_template_path.read_text(encoding="utf-8"))
+        template_path = self.prompt_template_path.with_name(attempt.prompt_template_name)
+        template = Template(template_path.read_text(encoding="utf-8"))
         original_tokens = self.tokenizer.count(chunk.text)
-        base_target_tokens = _target_rewrite_tokens(operator, original_tokens)
-        target_tokens = max(1, int(base_target_tokens * attempt.target_multiplier))
+        target_tokens = _target_rewrite_tokens(operator, original_tokens)
         return template.safe_substitute(
             operator=operator.value,
             operator_instruction=_operator_instruction(operator),
             operator_hard_requirements=_operator_hard_requirements(operator),
-            proposal_variation=_proposal_variation_instruction(attempt),
             original_prompt=self.original_prompt,
             chunk_type=chunk.chunk_type.value,
             original_chunk_tokens=original_tokens,
@@ -512,6 +678,8 @@ class LLMRewriteProposer:
     def _validate_rewrite(self, chunk: PromptChunk, rewritten: str) -> str | None:
         if not rewritten.strip():
             return "empty"
+        if any(ord(character) < 32 and character not in {"\n", "\r", "\t"} for character in rewritten):
+            return "control_character"
         forbidden = (
             "original_chunk_tokens",
             "hard constraints",
@@ -672,13 +840,6 @@ def _rewrite_with_attempt(
 
 def _normalize_rewrite_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
-
-
-def _proposal_variation_instruction(attempt: RewriteAttempt) -> str:
-    return (
-        f"attempt_id={attempt.id}; aggression={attempt.aggression}; "
-        f"target_multiplier={attempt.target_multiplier:.2f}; {attempt.style_hint}"
-    )
 
 
 def _extract_json_object(text: str) -> dict:

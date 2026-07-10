@@ -1,0 +1,35 @@
+AI SOC RUNBOOK: STRUCTURED EXTRACTION
+
+Task: Extract the structured record for CURRENT INCIDENT only.
+Evidence rule: Ignore every value in RELATED HISTORICAL INCIDENT, even when its fields look relevant.
+
+Procedure:
+1. Read the supplied investigation bundle.
+2. Populate every schema field from explicit in-scope evidence.
+3. Keep all keys and literal values exact; retain list order.
+4. Use null/[] when evidence is absent.
+5. Emit only the JSON object, without markdown or commentary.
+
+Required object:
+{
+  "incident_id": "string",
+  "classification": "string",
+  "disposition": "string",
+  "first_observed_at": "ISO-8601 string",
+  "last_observed_at": "ISO-8601 string",
+  "set_role_names": [
+    "string"
+  ],
+  "matched_rules": [
+    "string"
+  ],
+  "products_observed": [
+    "string"
+  ],
+  "attack_techniques": [
+    "string"
+  ]
+}
+
+Evidence:
+{{input}}

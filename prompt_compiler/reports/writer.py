@@ -46,7 +46,16 @@ def _write_frontier_csv(path: Path, result: "CompressionRunResult") -> None:
                 "normalized_token_reduction",
                 "avg_semantic_drift",
                 "avg_normalized_semantic_drift",
+                "avg_judge_loss",
+                "avg_judge_position_disagreement",
+                "avg_combined_semantic_loss",
+                "reference_extraction_f1",
+                "candidate_extraction_f1",
+                "extraction_f1_delta",
                 "objective_score",
+                "evaluation_profile",
+                "token_loss",
+                "task_loss",
                 "format_failure_rate",
                 "task_failure_rate",
             ],
@@ -61,7 +70,20 @@ def _write_frontier_csv(path: Path, result: "CompressionRunResult") -> None:
                     "normalized_token_reduction": report.normalized_token_reduction,
                     "avg_semantic_drift": report.avg_semantic_drift,
                     "avg_normalized_semantic_drift": report.avg_normalized_semantic_drift,
+                    "avg_judge_loss": report.avg_judge_loss,
+                    "avg_judge_position_disagreement": report.avg_judge_position_disagreement,
+                    "avg_combined_semantic_loss": report.avg_combined_semantic_loss,
+                    "reference_extraction_f1": (
+                        report.reference_extraction.get("f1") if report.reference_extraction else None
+                    ),
+                    "candidate_extraction_f1": (
+                        report.candidate_extraction.get("f1") if report.candidate_extraction else None
+                    ),
+                    "extraction_f1_delta": report.extraction_f1_delta,
                     "objective_score": report.objective_score,
+                    "evaluation_profile": report.evaluation_profile,
+                    "token_loss": report.token_loss,
+                    "task_loss": report.task_loss,
                     "format_failure_rate": report.format_failure_rate,
                     "task_failure_rate": report.task_failure_rate,
                 }

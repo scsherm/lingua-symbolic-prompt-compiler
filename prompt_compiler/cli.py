@@ -10,6 +10,7 @@ from prompt_compiler.env import load_env_file
 from prompt_compiler.eval.contract_checks import OutputContract
 from prompt_compiler.eval.embedding_distance import DEFAULT_EMBEDDING_MODEL, make_drift_scorer
 from prompt_compiler.eval.evaluator import EvaluationWeights
+from prompt_compiler.eval.llm_judge import LLMSemanticJudge
 from prompt_compiler.models.mock import RuleBasedMockModel
 from prompt_compiler.models.openai_client import OpenAIResponsesModel
 from prompt_compiler.models.base import GenerateParams, ModelClient
@@ -30,7 +31,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Behavioral prompt compression compiler")
     parser.add_argument("--model", default="mock", help="Model id. Use 'mock' or an OpenAI model id.")
     parser.add_argument("--provider", default="auto", choices=("auto", "mock", "openai"))
-    parser.add_argument("--proposer", default="auto", choices=("auto", "rule", "openai"))
+    parser.add_argument("--proposer", default="auto", choices=("auto", "openai"))
     parser.add_argument(
         "--proposer-model",
         default=None,
@@ -38,6 +39,17 @@ def main() -> int:
     )
     parser.add_argument("--proposer-max-output-tokens", type=int, default=16384)
     parser.add_argument("--proposer-reasoning-effort", default=DEFAULT_OPENAI_PROPOSER_REASONING_EFFORT)
+    parser.add_argument("--judge-model", default=None, help="OpenAI model used for normalized semantic judging.")
+    parser.add_argument("--judge-max-output-tokens", type=int, default=4096)
+    parser.add_argument("--judge-reasoning-effort", default="medium")
+    parser.add_argument(
+        "--evaluation-profile",
+        choices=("auto", "generative", "extraction"),
+        default="auto",
+        help="Selection metric profile. Extraction uses ground-truth F1 plus token loss.",
+    )
+    parser.add_argument("--task-weight", type=float, default=0.5)
+    parser.add_argument("--token-weight", type=float, default=0.5)
     parser.add_argument("--prompt", required=True, help="Path to original prompt template")
     parser.add_argument("--inputs", required=True, help="JSONL file with {'id','input'} rows")
     parser.add_argument("--output-dir", required=True, help="Directory for run artifacts")
@@ -52,7 +64,7 @@ def main() -> int:
         default=0.15,
         help="Minimum estimated instruction-token reduction for candidates shown in preview mode.",
     )
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--population-size", type=int, default=32)
     parser.add_argument(
         "--example-limit",
@@ -96,16 +108,28 @@ def main() -> int:
         help="Max tokenizer tokens per token_window chunker chunk.",
     )
     parser.add_argument(
-        "--proposal-attempts",
+        "--prompt-perturbations",
         type=int,
-        default=1,
-        help="LLM rewrite attempts per chunk/operator. Attempts after the first use logged proposer jitter.",
+        default=2,
+        help="Number of LLM-generated semantic perturbations of the canonical proposer instructions.",
+    )
+    parser.add_argument(
+        "--rewrites-per-prompt",
+        type=int,
+        default=4,
+        help="Distinct mixed-representation rewrites requested from each proposer context.",
+    )
+    parser.add_argument(
+        "--proposal-pool-limit",
+        type=int,
+        default=12,
+        help="Maximum unique shorter rewrites retained per chunk.",
     )
     parser.add_argument(
         "--proposal-jitter-seed",
         type=int,
         default=0,
-        help="Seed for selecting proposer jitter attempts.",
+        help="Seed for ordering proposer prompt wording variants.",
     )
     parser.add_argument(
         "--live-log-file",
@@ -151,6 +175,7 @@ def main() -> int:
         return 0
 
     model = _build_model(args)
+    semantic_judge = _build_semantic_judge(args)
     params = GenerateParams(
         temperature=args.temperature,
         top_p=args.top_p,
@@ -166,7 +191,11 @@ def main() -> int:
         epochs=args.epochs,
         population_size=args.population_size,
         tokenizer=tokenizer,
-        evaluation_weights=EvaluationWeights(semantic_drift_normalization=args.semantic_drift_normalization),
+        evaluation_weights=EvaluationWeights(
+            token=args.token_weight,
+            task=args.task_weight,
+            semantic_drift_normalization=args.semantic_drift_normalization,
+        ),
         drift_scorer=make_drift_scorer(
             args.embedding_provider,
             model_name=args.embedding_model,
@@ -182,8 +211,10 @@ def main() -> int:
         chunker_names=chunker_names,
         token_window_size=args.token_window_size,
         elitism_count=args.elitism_count,
-        proposal_attempts=args.proposal_attempts,
+        proposal_attempts=1,
         proposal_jitter_seed=args.proposal_jitter_seed,
+        semantic_judge=semantic_judge,
+        evaluation_profile=args.evaluation_profile,
     )
     print(json.dumps(result.evaluation_report.to_dict(), ensure_ascii=False, indent=2))
     print(f"best_prompt={Path(args.output_dir) / 'best_prompt.txt'}")
@@ -222,8 +253,8 @@ def _build_model(args: argparse.Namespace) -> ModelClient:
 def _build_rewrite_proposer(args: argparse.Namespace, prompt: PromptTemplate, tokenizer) -> RewriteProposer | None:
     proposer = args.proposer
     if proposer == "auto":
-        proposer = "rule" if _target_provider(args) == "mock" else "openai"
-    if proposer == "rule":
+        proposer = "mock" if _target_provider(args) == "mock" else "openai"
+    if proposer == "mock":
         return None
     if proposer == "openai":
         if not os.environ.get("OPENAI_API_KEY"):
@@ -247,8 +278,31 @@ def _build_rewrite_proposer(args: argparse.Namespace, prompt: PromptTemplate, to
             trace_path=Path(args.output_dir) / "proposer_traces.jsonl",
             event_log_path=Path(args.output_dir) / "run_events.jsonl",
             event_log_paths=(Path(args.live_log_file),) if args.live_log_file else (),
+            prompt_perturbations=max(0, args.prompt_perturbations),
+            rewrites_per_prompt=max(1, args.rewrites_per_prompt),
+            proposal_pool_limit=max(1, args.proposal_pool_limit),
+            jitter_seed=args.proposal_jitter_seed,
         )
     raise SystemExit(f"Unknown proposer: {proposer}")
+
+
+def _build_semantic_judge(args: argparse.Namespace) -> LLMSemanticJudge | None:
+    if not args.judge_model:
+        return None
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise SystemExit("OPENAI_API_KEY was not found in the environment or env file.")
+    model = OpenAIResponsesModel(
+        name=args.judge_model,
+        send_sampling_params=args.send_openai_sampling_params,
+    )
+    return LLMSemanticJudge(
+        model=model,
+        params=GenerateParams(
+            max_tokens=args.judge_max_output_tokens,
+            reasoning_effort=args.judge_reasoning_effort,
+        ),
+        trace_path=Path(args.output_dir) / "judge_traces.jsonl",
+    )
 
 
 def _preview_candidates(
@@ -278,7 +332,7 @@ def _preview_candidates(
         proposer=rewrite_proposer,
         chunker_names=chunker_names,
         token_window_size=args.token_window_size,
-        proposal_attempts=args.proposal_attempts,
+        proposal_attempts=1,
         proposal_jitter_seed=args.proposal_jitter_seed,
     )
     generated_candidates = seed_result.candidates
@@ -301,7 +355,6 @@ def _preview_candidates(
         "preview_min_token_reduction": args.preview_min_token_reduction,
         "chunkers": list(chunking_plan),
         "token_window_size": args.token_window_size,
-        "proposal_attempts": args.proposal_attempts,
         "proposal_jitter_seed": args.proposal_jitter_seed,
         "original_prompt": str(output_dir / "original_prompt.txt"),
         "candidate_templates_jsonl": str(output_dir / "candidate_templates.jsonl"),

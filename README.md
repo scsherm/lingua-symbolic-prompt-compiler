@@ -232,48 +232,20 @@ Those validity signals describe whether a candidate output remains usable by the
 
 ## Current Checkpoint
 
-The current verified checkpoint is the no-robots rich-prompt candidate run:
+The current checkpoint is a nine-problem SOC structured-extraction generalization suite built from three tasks and three starting-prompt formulations.
 
-```text
-candidate run: runs/no_robots_llm_prompt_v3
-side-by-side run: runs/no_robots_llm_prompt_v3_side_by_side_v3
-proposer model: gpt-5.4-mini-2026-03-17
-target model: gpt-5-nano-2025-08-07
-embedding model: mixedbread-ai/mxbai-embed-large-v1
-```
+Across the suite, the compiler reduced the reusable instruction portion by a median of 18.69% while generally preserving extraction F1 on untouched inputs. The reduction excludes the runtime input inserted into the prompt and excludes generated completion tokens.
 
-Run shape:
-
-- 24 proposer chunk rewrites saved in `proposer_traces.jsonl`
-- 6 candidate prompt templates saved in `candidate_templates.jsonl`
-- 3 inputs evaluated
-- 3 original-prompt reference completions
-- 18 candidate-prompt completions
-
-Verification artifacts:
-
-- `runs/no_robots_llm_prompt_v3_side_by_side_v3/provenance_audit.md`
-- `runs/no_robots_llm_prompt_v3_side_by_side_v3/openai_proposer_retrieval_audit.json`
-- `runs/no_robots_llm_prompt_v3_side_by_side_v3/openai_response_retrieval_audit.json`
-- `runs/no_robots_llm_prompt_v3_side_by_side_v3/loss_metrics.md`
-
-Candidate ranking from the checkpoint:
-
-| rank | candidate | token reduction | normalized drift | loss | validation note |
-|---:|---:|---:|---:|---:|---|
-| 1 | 4 | 0.399 | 0.598 | 0.599 | clear |
-| 2 | 3 | 0.416 | 0.616 | 0.600 | clear |
-| 3 | 1 | 0.347 | 0.577 | 0.615 | clear |
-| 4 | 5 | 0.387 | 0.669 | 0.641 | clear |
-| 5 | 2 | 0.382 | 0.686 | 0.652 | clear |
-| 6 | 6 | 0.295 | 0.728 | 0.717 | leaked meta structure |
+See [`docs/experiments/soc_instruction_compression_generalization.md`](docs/experiments/soc_instruction_compression_generalization.md) for the experimental design, complete results, interpretation, and limitations.
 
 ## Hugging Face Data
 
-The repo includes a normalized sample from `HuggingFaceH4/no_robots`:
+The repo includes normalized samples from `HuggingFaceH4/no_robots` and `witfoo/precinct6-cybersecurity`:
 
 ```text
 data/hf/no_robots_100.jsonl
+data/hf/witfoo_soc_extraction_100.jsonl
+data/hf/soc_generalization/
 ```
 
 Refresh it with:

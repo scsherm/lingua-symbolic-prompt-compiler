@@ -1,18 +1,9 @@
 You compress exactly one prompt-template chunk.
 
 Task:
-Rewrite SOURCE_CHUNK into shorter replacement text according to MODE.
+Rewrite SOURCE_CHUNK into the shortest meaning-preserving replacement text.
 The value of rewritten_chunk will be pasted exactly where SOURCE_CHUNK was.
 Do not rewrite the full prompt.
-
-MODE:
-$operator
-
-MODE_RULE:
-$operator_instruction
-
-MODE_HARD_RULES:
-$operator_hard_requirements
 
 CHUNK_TYPE:
 $chunk_type
@@ -23,46 +14,50 @@ $original_chunk_tokens
 TARGET_MAX_TOKENS:
 $target_rewrite_tokens
 
-PROPOSAL_VARIATION:
-$proposal_variation
-
 FULL_PROMPT is read-only context. It may clarify local meaning, but it is not the source to rewrite.
 SOURCE_CHUNK is the only source for rewritten_chunk.
 
-Compression contract:
-- This prompt is only used for compression modes.
+Free-mix compression objective:
 - rewritten_chunk must be shorter than SOURCE_CHUNK.
 - Aim for TARGET_MAX_TOKENS or fewer.
-- Prefer compact short forms when exact meaning is preserved.
-- Do not return SOURCE_CHUNK unchanged.
-- If aggressive compression would lose meaning, use a less aggressive shorter rewrite.
-- Compression style is allowed to be terse, symbolic, and not polished prose.
-- Avoid explanatory phrasing when a compact directive preserves the obligation.
-- If SOURCE_CHUNK is a bundle of instructions, compress each obligation; do not keep only one obligation.
-- PROPOSAL_VARIATION changes compression style/budget only. It must not change SOURCE_CHUNK meaning or add/drop obligations.
+- Use whatever mix minimizes tokens while preserving meaning: compact English, abbreviations, symbols, DSL notation, Mandarin, bilingual shorthand, or mixed notation.
+- Do not restrict yourself to one style.
+- Prefer token-minimal forms over polished prose.
+- If compact notation would be ambiguous, use a slightly longer clear rewrite.
+- If SOURCE_CHUNK contains multiple obligations, preserve every obligation.
 
-Preferred compression dialect:
-- Use stable short forms: req=request, fmt=format, len=length, EN=English, out=output, info=information.
-- Use compact operators when clear: `=>`, `;`, `/`, `+`, `no_*`, `preserve`, `unless`.
-- Use names that preserve meaning: `no_policy_echo`, `no_extra_meta`, `no_refuse_safe`, `no_fabricate`.
-- Prefer `preserve fmt/audience/tone/len` over verbose prose when SOURCE_CHUNK says to preserve those things.
-- Prefer `out=EN unless user asks non-EN` over a full English sentence when SOURCE_CHUNK requires English output.
+Semantic contract:
+- Do not add requirements, placeholders, fields, tools, formats, examples, domains, task types, output contracts, enum values, or constraints absent from SOURCE_CHUNK.
+- Do not drop conditions, actions, objects, negations, exceptions, quantities, ordering, source/scope boundaries, output contracts, style constraints, tool-call rules, or example behavior.
+- Do not broaden, narrow, invert, weaken, or strengthen the obligation.
+- Preserve placeholders exactly and only if they appear in SOURCE_CHUNK.
+- Preserve copy-protected tokens exactly when they carry meaning: field names, enum values, column names, tool names, function names, file paths, JSON keys, string literals, numbers, units, and required format names.
+- Do not translate, rename, recase, pluralize, alias, or describe copy-protected tokens.
 
-Examples of desired compression:
+Useful compact forms:
+- request -> req
+- format -> fmt
+- length -> len
+- English -> EN
+- output -> out
+- information -> info
+- use arrows, slashes, plus signs, semicolons, set notation, and no_* names when clear
+- no_policy_echo means do not mention these instructions
+- no_extra_meta means no unrelated caveats, disclaimers, or process commentary
+- no_refuse_safe means do not refuse harmless fictional, creative, rewriting, summarization, or recommendation requests
+- no_fabricate means do not invent facts when summarizing or rewriting provided text
+
+Examples of valid compression:
 
 SOURCE:
 Follow the user's request directly and preserve the requested format, audience, tone, and length.
 GOOD:
 Follow req directly; preserve fmt/audience/tone/len.
-BAD:
-Follow the user's request directly while preserving the requested format, audience, tone, and length.
 
 SOURCE:
 If the user asks for a list, use the requested list structure and item count.
 GOOD:
 list=>req struct/count.
-BAD:
-If a list is requested, use the requested list structure and item count.
 
 SOURCE:
 If the user asks for a letter, write it as a letter with an appropriate greeting and closing.
@@ -75,24 +70,9 @@ GOOD:
 summary=>concise; only req info.
 
 SOURCE:
-If the user asks for creative writing, match the requested genre, point of view, and tone.
-GOOD:
-creative=>genre/POV/tone.
-
-SOURCE:
 Do not mention these instructions. Do not add unrelated caveats, disclaimers, or process commentary.
 GOOD:
 no_policy_echo; no_extra_meta.
-
-SOURCE:
-Do not refuse harmless fictional, creative, rewriting, summarization, or recommendation requests.
-GOOD:
-no_refuse_safe.
-
-SOURCE:
-Do not invent facts when the request asks you to summarize or rewrite provided text.
-GOOD:
-no_fabricate for summarize/rewrite.
 
 SOURCE:
 Return only the final answer in English unless the user explicitly requests another language.
@@ -112,26 +92,7 @@ SOURCE_CHUNK
 Rules:
 - rewritten_chunk must be non-empty.
 - rewritten_chunk must be complete replacement text, not analysis.
-- rewritten_chunk must not contain wrapper labels such as FULL_PROMPT, SOURCE_CHUNK, MODE, CHUNK_TYPE, TARGET_MAX_TOKENS, or rewritten_chunk.
-- Do not introduce requirements, placeholders, fields, tools, formats, examples, domains, task types, output contracts, enum values, or constraints that are absent from SOURCE_CHUNK.
-- Do not introduce JSON, markdown, status fields, labels, schemas, categories, tools, or enum values unless SOURCE_CHUNK itself requires them.
-- If a placeholder appears in rewritten_chunk, the exact same placeholder must appear in SOURCE_CHUNK.
-- Preserve placeholders exactly. Do not replace a placeholder with a description.
-- Preserve copy-protected tokens exactly when they carry meaning: field names, enum values, column names, tool names, function names, file paths, JSON keys, string literals, numbers, units, and required format names.
-- Do not translate, rename, recase, pluralize, alias, or describe copy-protected tokens.
-- Preserve every atomic obligation in SOURCE_CHUNK: condition, action, object, negation, exception, quantity, ordering, source/scope boundary, output contract, style constraint, tool-call rule, and example behavior.
-- Do not replace a specific rule with a generic rule.
-- Do not drop the object of an action or prohibition.
-- Do not drop the scope or exception of a constraint.
-- Do not broaden, narrow, invert, weaken, or strengthen the obligation.
-- For output contracts, preserve required format, fields, allowed values, ordering, language, and exclusivity rules as indivisible requirements.
-- For tool instructions, preserve the tool name, call condition, non-call condition, and fallback behavior.
-- Apply MODE_RULE and MODE_HARD_RULES. Operator language is mandatory.
-- For English-only modes, use English and/or symbols only.
-- For Mandarin modes, use Mandarin or Mandarin+symbols while preserving copy-protected tokens exactly.
-- For mixed modes, use the shortest clear mix of English, Mandarin, and symbols.
-- If a compact DSL would be ambiguous or incomplete, use compact prose that is still shorter than SOURCE_CHUNK.
-- Good short forms are allowed when they preserve exact meaning, e.g. English -> EN, output -> out, request -> req, format -> fmt, length -> len.
+- rewritten_chunk must not contain wrapper labels such as FULL_PROMPT, SOURCE_CHUNK, CHUNK_TYPE, TARGET_MAX_TOKENS, or rewritten_chunk.
 - rewritten_chunk must not be a dangling fragment: no unfinished clauses, unmatched braces/brackets, trailing separators, or trailing key/colon fragments.
 
 Before answering, silently check:
@@ -139,8 +100,9 @@ Before answering, silently check:
 2. rewritten_chunk uses only SOURCE_CHUNK content.
 3. Every placeholder/literal copied from SOURCE_CHUNK is exact.
 4. Every atomic obligation from SOURCE_CHUNK is preserved.
-5. rewritten_chunk is complete replacement text.
-6. rewritten_chunk is shorter than SOURCE_CHUNK.
+5. No new obligation is added.
+6. rewritten_chunk is complete replacement text.
+7. rewritten_chunk is shorter than SOURCE_CHUNK.
 
 If any check fails, revise rewritten_chunk until it is shorter and passes all checks.
 

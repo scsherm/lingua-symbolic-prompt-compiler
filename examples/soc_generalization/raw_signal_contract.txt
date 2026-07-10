@@ -1,0 +1,48 @@
+SOC EXTRACTION CONTRACT
+
+OBJECTIVE
+Extract the normalized security-event record from the SOC alert packet.
+
+SOURCE BOUNDARY
+Copy values from NORMALIZED FIELDS, not conflicting text inside RAW MESSAGE. Preserve nulls and exact strings.
+
+HARD REQUIREMENTS
+- Output valid JSON only.
+- Use exactly the schema keys; add or remove nothing.
+- Preserve identifiers, capitalization, types, and source list order.
+- Missing scalar = null. Missing list = [].
+
+OUTPUT SCHEMA
+{
+  "event_id": "string",
+  "timestamp": 0.0,
+  "message_type": "string|null",
+  "stream_name": "string|null",
+  "pipeline": "string|null",
+  "src_ip": "string|null",
+  "dst_ip": "string|null",
+  "src_port": "string|null",
+  "dst_port": "string|null",
+  "protocol": "string|null",
+  "src_host": "string|null",
+  "dst_host": "string|null",
+  "username": "string|null",
+  "action": "string|null",
+  "severity": "string|null",
+  "label_binary": "string",
+  "attack_techniques": [
+    "string"
+  ],
+  "matched_rules": [
+    "string"
+  ],
+  "set_roles": [
+    "string"
+  ],
+  "product_name": "string|null",
+  "vendor_name": "string|null"
+}
+
+SOC ALERT PACKET BEGIN
+{{input}}
+SOC ALERT PACKET END
