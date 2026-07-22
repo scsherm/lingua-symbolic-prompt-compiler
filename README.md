@@ -98,8 +98,6 @@ Pip-only setup:
 python3 -m pip install -r requirements.txt
 ```
 
-`OPENAI_API_KEY` is loaded from the environment or `.env.local`.
-
 ## CLI
 
 Mock local run:
